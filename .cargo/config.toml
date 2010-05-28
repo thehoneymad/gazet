@@ -1,0 +1,12 @@
+# Cargo configuration for building with RocksDB on macOS
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/opt/homebrew/opt/llvm/lib"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/opt/homebrew/opt/llvm/lib"]
+
+[env]
+# Set LLVM paths for bindgen (used by rocksdb-sys)
+LLVM_CONFIG_PATH = "/opt/homebrew/opt/llvm/bin/llvm-config"
+LIBCLANG_PATH = "/opt/homebrew/opt/llvm/lib"

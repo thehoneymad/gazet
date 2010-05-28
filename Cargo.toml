@@ -1,0 +1,11 @@
+[package]
+name = "cascade"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+rocksdb = { version = "0.24.0", default-features = false, features = ["lz4"] }
+
+
+[dev-dependencies]

@@ -1,3 +1,4 @@
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a phrase (supports up to 4 billion phrases).
@@ -9,6 +10,27 @@ pub type LanguageSet = u128;
 
 /// Default zoom level for tile coordinate system (approximately 150m resolution with S2 Level 16)
 pub const DEFAULT_ZOOM: u16 = 16;
+
+/// Maximum expected size of a database key in bytes.
+/// Format: 1 (type_marker) + 4 (phrase_id) + 16 (max lang_set)
+pub const MAX_DB_KEY_SIZE: usize = 21;
+
+/// Language set value indicating all languages are supported.
+pub const ALL_LANGUAGES: LanguageSet = u128::MAX;
+
+/// Language set value indicating no specific languages.
+pub const NO_LANGUAGES: LanguageSet = 0;
+
+/// Type marker for database key entries.
+///
+/// Distinguishes between exact phrase lookups and prefix bin aggregations.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TypeMarker {
+    /// Exact phrase entry - stores all GridEntries for a specific phrase_id
+    SinglePhrase = 0,
+    /// Prefix bin entry - aggregated GridEntries for a range of phrase_ids
+    PrefixBin = 1,
+}
 
 /// Key for indexing phrases in the spatial grid store.
 ///
@@ -22,6 +44,58 @@ pub const DEFAULT_ZOOM: u16 = 16;
 pub struct GridKey {
     pub phrase_id: PhraseId,
     pub lang_set: LanguageSet,
+}
+
+impl GridKey {
+    /// Serializes the key to database format.
+    ///
+    /// # Format
+    /// `[type_marker: 1 byte][phrase_id: 4 bytes][lang_set: 0-16 bytes]`
+    ///
+    /// ## Type Marker
+    /// - `TypeMarker::SinglePhrase` (0) - Exact phrase entry
+    /// - `TypeMarker::PrefixBin` (1) - Prefix bin for range queries
+    ///
+    /// ## Phrase ID
+    /// - 4 bytes, big-endian u32
+    /// - Fixed width for lexicographic sorting
+    ///
+    /// ## Language Set
+    /// - Variable length (0-16 bytes), compressed by skipping leading zeros
+    /// - `u128::MAX` - All languages (writes nothing, empty = universal)
+    /// - `0` - No languages (writes single 0 byte)
+    /// - Other values - Specific language bits (compressed)
+    ///
+    pub fn to_db_key(&self, type_marker: TypeMarker) -> Vec<u8> {
+        let mut key = Vec::with_capacity(MAX_DB_KEY_SIZE); // 1 + 4 + 16 max
+        key.push(type_marker as u8);
+        key.write_u32::<BigEndian>(self.phrase_id).unwrap();
+
+        match self.lang_set {
+            ALL_LANGUAGES => {
+                // All languages - write nothing (empty = universal)
+            }
+            NO_LANGUAGES => {
+                // Empty language set
+                key.push(0);
+            }
+            _ => {
+                // Specific languages - compress
+                let bytes = self.lang_set.to_be_bytes();
+                let start = bytes.iter().position(|&b| b != 0).unwrap_or(16);
+                key.extend_from_slice(&bytes[start..]);
+            }
+        }
+
+        debug_assert!(
+            key.len() <= MAX_DB_KEY_SIZE,
+            "Key size {} exceeds maximum {}",
+            key.len(),
+            MAX_DB_KEY_SIZE
+        );
+
+        key
+    }
 }
 
 /// Specifies which phrase(s) to match in a query.
@@ -105,4 +179,137 @@ pub struct GridEntry {
     pub id: FeatureId,
     /// Hash of source phrase for deduplication (8 bits)
     pub source_phrase_hash: u8,
+}
+
+/// Converts float relevance to 2-bit integer (0-3).
+///
+/// Relevance values are quantized to 4 discrete levels during indexing
+/// for storage efficiency (2 bits instead of 64 bits for f64).
+///
+/// # Quantization Levels
+/// - 0.4 → 0 (very common terms, low relevance)
+/// - 0.6 → 1 (common terms, medium-low relevance)
+/// - 0.8 → 2 (uncommon terms, medium-high relevance)
+/// - 1.0 → 3 (rare terms, high relevance)
+///
+/// # Why Quantization?
+/// - Storage: 2 bits vs 64 bits per entry
+/// - Compression: Fewer unique values compress better with LZ4
+/// - Precision: Acceptable loss for approximate text matching
+#[inline]
+pub fn relev_float_to_int(relev: f64) -> u8 {
+    if relev <= 0.4 {
+        0
+    } else if relev <= 0.6 {
+        1
+    } else if relev <= 0.8 {
+        2
+    } else {
+        3
+    }
+}
+
+/// Combined relevance and score key (4 bits each, stored in u8).
+/// Upper 4 bits: relevance (0-3)
+/// Lower 4 bits: score (0-15)
+pub type RelevScore = u8;
+
+/// Combines relevance and score into a single byte for efficient grouping.
+///
+/// Creates a composite key used to group GridEntries by importance:
+/// - Upper 4 bits: relevance (0-3, quantized from 0.4-1.0)
+/// - Lower 4 bits: score (0-15, truncated from 0-255)
+///
+/// This grouping enables:
+/// 1. Pre-sorted storage (high relevance/score first)
+/// 2. Better compression (similar values grouped together)
+/// 3. Efficient query filtering (skip low-relevance groups)
+///
+/// # Example
+///
+/// let key = encode_relev_score(0.8, 255);
+/// // relev 0.8 → 2 (0010 in binary)
+/// // score 255 → 15 (truncated to 1111 in binary)
+/// // result: 0010_1111 = 47
+///
+#[inline]
+pub fn encode_relev_score(relev: f64, score: u8) -> RelevScore {
+    let relev_bits = relev_float_to_int(relev);
+    let score_bits = score & 0x0F;
+    (relev_bits << 4) | score_bits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_relev_score, relev_float_to_int};
+
+    #[test]
+    fn test_relev_float_to_int() {
+        assert_eq!(relev_float_to_int(0.0), 0);
+        assert_eq!(relev_float_to_int(0.4), 0);
+        assert_eq!(relev_float_to_int(0.5), 1);
+        assert_eq!(relev_float_to_int(0.6), 1);
+        assert_eq!(relev_float_to_int(0.7), 2);
+        assert_eq!(relev_float_to_int(0.8), 2);
+        assert_eq!(relev_float_to_int(0.9), 3);
+        assert_eq!(relev_float_to_int(1.0), 3);
+        assert_eq!(relev_float_to_int(4.0), 3);
+    }
+
+    #[test]
+    fn test_encode_relev_score() {
+        // Test all relevance levels with max score
+        assert_eq!(encode_relev_score(0.4, 255), 0b0000_1111);
+        assert_eq!(encode_relev_score(0.6, 255), 0b0001_1111);
+        assert_eq!(encode_relev_score(0.8, 255), 0b0010_1111);
+        assert_eq!(encode_relev_score(1.0, 255), 0b0011_1111);
+
+        // Test score truncation
+        assert_eq!(encode_relev_score(1.0, 0), 0b0011_0000);
+        assert_eq!(encode_relev_score(1.0, 15), 0b0011_1111);
+        assert_eq!(encode_relev_score(1.0, 16), 0b0011_0000);
+        assert_eq!(encode_relev_score(1.0, 240), 0b0011_0000);
+
+        // Test both together
+        assert_eq!(encode_relev_score(0.6, 2), 0b0001_0010);
+    }
+
+    #[test]
+    fn test_to_db_key() {
+        use super::{GridKey, TypeMarker, ALL_LANGUAGES, NO_LANGUAGES};
+
+        // Test with all languages
+        let key = GridKey { phrase_id: 42, lang_set: ALL_LANGUAGES };
+        let db_key = key.to_db_key(TypeMarker::SinglePhrase);
+        assert_eq!(db_key, vec![
+            0b0000_0000,  // type marker
+            0b0000_0000, 0b0000_0000, 0b0000_0000, 0b0010_1010  // phrase_id = 42
+        ]);
+
+        // Test with no languages
+        let key = GridKey { phrase_id: 42, lang_set: NO_LANGUAGES };
+        let db_key = key.to_db_key(TypeMarker::SinglePhrase);
+        assert_eq!(db_key, vec![
+            0b0000_0000,  // type marker
+            0b0000_0000, 0b0000_0000, 0b0000_0000, 0b0010_1010,  // phrase_id = 42
+            0b0000_0000   // NO_LANGUAGES marker
+        ]);
+
+        // Test with specific language (bit 0 set)
+        let key = GridKey { phrase_id: 42, lang_set: 1 };
+        let db_key = key.to_db_key(TypeMarker::SinglePhrase);
+        assert_eq!(db_key, vec![
+            0b0000_0000,  // type marker
+            0b0000_0000, 0b0000_0000, 0b0000_0000, 0b0010_1010,  // phrase_id = 42
+            0b0000_0001   // lang_set = 1 (compressed)
+        ]);
+
+        // Test prefix bin type marker
+        let key = GridKey { phrase_id: 100, lang_set: ALL_LANGUAGES };
+        let db_key = key.to_db_key(TypeMarker::PrefixBin);
+        assert_eq!(db_key, vec![
+            0b0000_0001,  // type marker = 1
+            0b0000_0000, 0b0000_0000, 0b0000_0000, 0b0110_0100  // phrase_id = 100
+        ]);
+    }
 }

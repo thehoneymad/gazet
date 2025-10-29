@@ -17,12 +17,15 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 ### Completed
 - ✅ Core data structures (GridKey, MatchKey, MatchOpts, GridEntry)
 - ✅ Error handling with backend-agnostic StorageError
-- ✅ GridStoreBuilder skeleton (RocksDB-based)
+- ✅ Type aliases (PhraseId, LanguageSet, FeatureId, RelevScore)
+- ✅ Relevance/score encoding functions with unit tests
+- ✅ GridKey serialization to database format
+- ✅ GridStoreBuilder with optimized BuilderEntry structure
 - ✅ Module organization (common, error, builder)
 
 ### In Progress
-- 🔨 GridStoreBuilder serialization and storage implementation
-- 🔨 Test data ingestion
+- 🔨 BuilderEntry value serialization
+- 🔨 GridStore reader implementation
 
 ## Key Concepts
 
@@ -32,20 +35,31 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 - `PhraseId` - Unique identifier for phrases (u32, supports 4B phrases)
 - `LanguageSet` - 128-bit bitfield for language support
 - `FeatureId` - Unique identifier for features (u32, truncated to 24 bits in storage)
+- `RelevScore` - Combined relevance+score key (u8, 4 bits each)
 - `GridKey` - Phrase + language combination for indexing
 - `GridEntry` - Feature at a location with relevance scoring
 
 ## Engineering Tasks
 
 ### Phase 1: Basic Storage (Current)
-- [ ] Implement GridStoreBuilder.insert() with serialization
-  - [ ] Serialize GridKey to database key format
-  - [ ] Serialize Vec<GridEntry> to database value format
-  - [ ] Write to RocksDB
-- [ ] Write basic insertion tests
-  - [ ] Test single entry insertion
-  - [ ] Test multiple entries for same key
-  - [ ] Test retrieval of inserted data
+- [x] Implement relevance/score encoding
+  - [x] relev_float_to_int() - Quantize relevance to 2 bits
+  - [x] encode_relev_score() - Combine into single byte
+  - [x] pack_feature_id() - Pack feature ID with source phrase hash
+  - [x] Unit tests for encoding functions
+- [x] Implement GridKey serialization
+  - [x] to_db_key() method with type marker support
+  - [x] Big-endian phrase_id encoding
+  - [x] Compressed language set encoding
+- [x] Implement GridStoreBuilder.insert() with serialization
+  - [x] Optimized BuilderEntry structure (grouped by relev+score)
+  - [x] extend_entries() helper with batch grouping
+  - [x] Serialize BuilderEntry to database value format (bincode)
+  - [x] Write to RocksDB via finish()
+- [x] Write basic insertion tests
+  - [x] Test single entry insertion
+  - [x] Test multiple entries for same key
+  - [x] Test append merges entries
 - [ ] Implement GridStore reader
   - [ ] Create GridStore struct
   - [ ] Implement get() method

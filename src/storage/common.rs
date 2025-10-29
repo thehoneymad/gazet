@@ -239,6 +239,31 @@ pub fn encode_relev_score(relev: f64, score: u8) -> RelevScore {
     (relev_bits << 4) | score_bits
 }
 
+/// Packed feature identifier with source phrase hash for deduplication.
+///
+/// Combines feature ID (24 bits) and source phrase hash (8 bits) into a single u32.
+/// The hash enables deduplication when the same feature matches multiple query phrases.
+///
+/// Format: [feature_id: 24 bits][source_phrase_hash: 8 bits]
+pub type PackedFeatureId = u32;
+
+/// Morton-encoded spatial coordinate.
+///
+/// A u32 that encodes (x, y) tile coordinates by interleaving their bits.
+/// Preserves spatial locality: nearby coordinates have nearby morton codes.
+///
+/// Created by: `interleave_morton(x: u16, y: u16) -> MortonCode`
+///
+/// # Future Migration
+/// Will be replaced with S2 CellID (u64) for hierarchical spatial queries.
+pub type MortonCode = u32;
+
+/// Packs feature ID (24 bits) and source phrase hash (8 bits) into u32.
+#[inline]
+pub fn pack_feature_id(id: FeatureId, source_phrase_hash: u8) -> PackedFeatureId {
+    (id << 8) | (source_phrase_hash as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{encode_relev_score, relev_float_to_int};

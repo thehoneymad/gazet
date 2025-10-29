@@ -1,5 +1,7 @@
 use byteorder::{BigEndian, WriteBytesExt};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+use std::collections::HashMap;
 
 /// Unique identifier for a phrase (supports up to 4 billion phrases).
 pub type PhraseId = u32;
@@ -209,6 +211,17 @@ pub fn relev_float_to_int(relev: f64) -> u8 {
     }
 }
 
+/// Converts quantized relevance back to float.
+#[inline]
+pub fn relev_int_to_float(relev: u8) -> f64 {
+    match relev {
+        0 => 0.4,
+        1 => 0.6,
+        2 => 0.8,
+        _ => 1.0,
+    }
+}
+
 /// Combined relevance and score key (4 bits each, stored in u8).
 /// Upper 4 bits: relevance (0-3)
 /// Lower 4 bits: score (0-15)
@@ -239,6 +252,14 @@ pub fn encode_relev_score(relev: f64, score: u8) -> RelevScore {
     (relev_bits << 4) | score_bits
 }
 
+/// Decodes relevance and score from packed RelevScore.
+#[inline]
+pub fn decode_relev_score(relev_score: RelevScore) -> (f64, u8) {
+    let relev = relev_int_to_float(relev_score >> 4);
+    let score = relev_score & 0x0F;
+    (relev, score)
+}
+
 /// Packed feature identifier with source phrase hash for deduplication.
 ///
 /// Combines feature ID (24 bits) and source phrase hash (8 bits) into a single u32.
@@ -264,9 +285,82 @@ pub fn pack_feature_id(id: FeatureId, source_phrase_hash: u8) -> PackedFeatureId
     (id << 8) | (source_phrase_hash as u32)
 }
 
+/// Unpacks feature ID and source phrase hash from PackedFeatureId.
+#[inline]
+pub fn unpack_feature_id(packed: PackedFeatureId) -> (FeatureId, u8) {
+    let id = packed >> 8;
+    let source_phrase_hash = (packed & 0xFF) as u8;
+    (id, source_phrase_hash)
+}
+
+/// Nested storage structure for efficient grouping and compression.
+///
+/// Organizes GridEntries in a three-level hierarchy optimized for both
+/// storage efficiency and query performance.
+///
+///
+/// # Level 1: RelevScore (u8)
+///
+/// Combined relevance and score key that groups entries by importance:
+/// - Upper 4 bits: Relevance (0-3, quantized from 0.4-1.0)
+/// - Lower 4 bits: Score (0-15, truncated from 0-255)
+///
+/// **Benefits:**
+/// - Pre-sorted results: High relevance/score entries come first
+/// - Better compression: Similar values grouped together
+/// - Query optimization: Can skip low-relevance groups entirely
+///
+/// # Level 2: Morton Code (u32)
+///
+/// Spatially-encoded coordinate that preserves locality:
+/// - Interleaves x and y coordinate bits
+/// - Nearby points get nearby morton codes
+/// - Enables efficient spatial range queries
+///
+/// **Future:** Will be replaced with S2 CellID (u64) for hierarchical queries
+///
+/// # Level 3: PackedFeatureId (SmallVec<[u32; 4]>)
+///
+/// List of features at this RelevScore and coordinate:
+/// - Each u32 packs: feature_id (24 bits) + source_phrase_hash (8 bits)
+/// - SmallVec stores ≤4 items inline (no heap allocation)
+/// - Spills to heap only when >4 features (uncommon)
+///
+/// **Packing format:**
+/// text
+/// u32: [feature_id: 24 bits][source_phrase_hash: 8 bits]
+///
+/// Example:
+/// feature_id = 12345 (0x003039)
+/// hash = 42 (0x2A)
+/// packed = (12345 << 8) | 42 = 0x00303A2A
+///
+/// **Why pack together?**
+/// When a feature generates multiple phrases ("main", "street", "main street"),
+/// the hash identifies they came from the same source phrase, enabling
+/// deduplication during query processing.
+///
+/// **Why SmallVec:**
+/// Most coordinates have 1-4 features, so SmallVec avoids heap allocations
+/// for the common case while still supporting unlimited features when needed.
+///
+#[derive(Serialize, Deserialize)]
+pub struct BuilderEntry {
+    pub(crate) inner: HashMap<RelevScore, HashMap<MortonCode, SmallVec<[PackedFeatureId; 4]>>>,
+}
+
+impl BuilderEntry {
+    pub(crate) fn new() -> Self {
+        BuilderEntry {
+            inner: HashMap::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{encode_relev_score, relev_float_to_int};
+    use crate::storage::{decode_relev_score, pack_feature_id, unpack_feature_id};
 
     #[test]
     fn test_relev_float_to_int() {
@@ -304,37 +398,113 @@ mod tests {
         use super::{GridKey, TypeMarker, ALL_LANGUAGES, NO_LANGUAGES};
 
         // Test with all languages
-        let key = GridKey { phrase_id: 42, lang_set: ALL_LANGUAGES };
+        let key = GridKey {
+            phrase_id: 42,
+            lang_set: ALL_LANGUAGES,
+        };
         let db_key = key.to_db_key(TypeMarker::SinglePhrase);
-        assert_eq!(db_key, vec![
-            0b0000_0000,  // type marker
-            0b0000_0000, 0b0000_0000, 0b0000_0000, 0b0010_1010  // phrase_id = 42
-        ]);
+        assert_eq!(
+            db_key,
+            vec![
+                0b0000_0000, // type marker
+                0b0000_0000,
+                0b0000_0000,
+                0b0000_0000,
+                0b0010_1010 // phrase_id = 42
+            ]
+        );
 
         // Test with no languages
-        let key = GridKey { phrase_id: 42, lang_set: NO_LANGUAGES };
+        let key = GridKey {
+            phrase_id: 42,
+            lang_set: NO_LANGUAGES,
+        };
         let db_key = key.to_db_key(TypeMarker::SinglePhrase);
-        assert_eq!(db_key, vec![
-            0b0000_0000,  // type marker
-            0b0000_0000, 0b0000_0000, 0b0000_0000, 0b0010_1010,  // phrase_id = 42
-            0b0000_0000   // NO_LANGUAGES marker
-        ]);
+        assert_eq!(
+            db_key,
+            vec![
+                0b0000_0000, // type marker
+                0b0000_0000,
+                0b0000_0000,
+                0b0000_0000,
+                0b0010_1010, // phrase_id = 42
+                0b0000_0000  // NO_LANGUAGES marker
+            ]
+        );
 
         // Test with specific language (bit 0 set)
-        let key = GridKey { phrase_id: 42, lang_set: 1 };
+        let key = GridKey {
+            phrase_id: 42,
+            lang_set: 1,
+        };
         let db_key = key.to_db_key(TypeMarker::SinglePhrase);
-        assert_eq!(db_key, vec![
-            0b0000_0000,  // type marker
-            0b0000_0000, 0b0000_0000, 0b0000_0000, 0b0010_1010,  // phrase_id = 42
-            0b0000_0001   // lang_set = 1 (compressed)
-        ]);
+        assert_eq!(
+            db_key,
+            vec![
+                0b0000_0000, // type marker
+                0b0000_0000,
+                0b0000_0000,
+                0b0000_0000,
+                0b0010_1010, // phrase_id = 42
+                0b0000_0001  // lang_set = 1 (compressed)
+            ]
+        );
 
         // Test prefix bin type marker
-        let key = GridKey { phrase_id: 100, lang_set: ALL_LANGUAGES };
+        let key = GridKey {
+            phrase_id: 100,
+            lang_set: ALL_LANGUAGES,
+        };
         let db_key = key.to_db_key(TypeMarker::PrefixBin);
-        assert_eq!(db_key, vec![
-            0b0000_0001,  // type marker = 1
-            0b0000_0000, 0b0000_0000, 0b0000_0000, 0b0110_0100  // phrase_id = 100
-        ]);
+        assert_eq!(
+            db_key,
+            vec![
+                0b0000_0001, // type marker = 1
+                0b0000_0000,
+                0b0000_0000,
+                0b0000_0000,
+                0b0110_0100 // phrase_id = 100
+            ]
+        );
+    }
+
+    #[test]
+    fn test_decode_relev_score() {
+        // Test all relevance levels
+        assert_eq!(decode_relev_score(0b0000_1111), (0.4, 15));
+        assert_eq!(decode_relev_score(0b0001_1111), (0.6, 15));
+        assert_eq!(decode_relev_score(0b0010_1111), (0.8, 15));
+        assert_eq!(decode_relev_score(0b0011_1111), (1.0, 15));
+
+        // Test different scores
+        assert_eq!(decode_relev_score(0b0011_0000), (1.0, 0));
+        assert_eq!(decode_relev_score(0b0011_0101), (1.0, 5));
+
+        // Test round-trip
+        let encoded = encode_relev_score(0.8, 10);
+        let (relev, score) = decode_relev_score(encoded);
+        assert_eq!(relev, 0.8);
+        assert_eq!(score, 10);
+    }
+
+    #[test]
+    fn test_pack_unpack_feature_id() {
+        // Test basic packing/unpacking
+        let packed = pack_feature_id(12345, 42);
+        let (id, hash) = unpack_feature_id(packed);
+        assert_eq!(id, 12345);
+        assert_eq!(hash, 42);
+
+        // Test edge cases
+        let packed = pack_feature_id(0, 0);
+        assert_eq!(unpack_feature_id(packed), (0, 0));
+
+        let packed = pack_feature_id(16777215, 255); // Max 24-bit id, max 8-bit hash
+        assert_eq!(unpack_feature_id(packed), (16777215, 255));
+
+        // Test round-trip
+        let original = (999999, 123);
+        let packed = pack_feature_id(original.0, original.1);
+        assert_eq!(unpack_feature_id(packed), original);
     }
 }

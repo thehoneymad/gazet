@@ -41,11 +41,13 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 
 ## Engineering Tasks
 
-### Phase 1: Basic Storage (Current)
+### Phase 1: Basic Storage ✅ COMPLETE
 - [x] Implement relevance/score encoding
   - [x] relev_float_to_int() - Quantize relevance to 2 bits
   - [x] encode_relev_score() - Combine into single byte
+  - [x] decode_relev_score() - Unpack relevance and score
   - [x] pack_feature_id() - Pack feature ID with source phrase hash
+  - [x] unpack_feature_id() - Extract ID and hash
   - [x] Unit tests for encoding functions
 - [x] Implement GridKey serialization
   - [x] to_db_key() method with type marker support
@@ -60,12 +62,13 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
   - [x] Test single entry insertion
   - [x] Test multiple entries for same key
   - [x] Test append merges entries
-- [ ] Implement GridStore reader
-  - [ ] Create GridStore struct
-  - [ ] Implement get() method
-  - [ ] Add iterator support for range queries
+- [x] Implement GridStore reader
+  - [x] Create GridStore struct with read-only + mmap
+  - [x] Implement get() method for exact lookups
+  - [x] Add roundtrip tests (write→read verification)
+  - [ ] Add iterator support for range queries (deferred to Phase 2)
 
-### Phase 2: Query Support
+### Phase 2: Query Support (Current)
 - [ ] Implement spatial matching
   - [ ] Bounding box queries
   - [ ] Proximity-based ranking

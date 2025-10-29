@@ -1,78 +1,47 @@
+//! GridStore builder for creating spatial phrase indexes.
+//!
+//! # Overview
+//!
+//! A **grid** is a spatial coordinate (x, y) where a feature appears. A single phrase like
+//! "Main Street" may appear at hundreds of grid coordinates across a city or region.
+//!
+//! `GridStoreBuilder` accumulates all grids for all phrases in a geocoding index
+//! (e.g., "streets", "cities", "countries") and writes them to a single RocksDB database.
+//!
+//! # Architecture
+//!
+//! **One builder per index**, not per grid or per phrase:
+//! - A "streets" index contains millions of phrases, each with multiple grid coordinates
+//! - All data is accumulated in memory during building
+//! - `finish()` writes everything to one RocksDB database
+//!
+//! ## Storage Structure
+//!
+//! ```text
+//! streets.rocksdb/                                    # One database per index
+//! ├─ [type:0][phrase_id:1][lang:0] → BuilderEntry   # "main street" at 500 coordinates
+//! ├─ [type:0][phrase_id:2][lang:0] → BuilderEntry   # "oak avenue" at 200 coordinates
+//! ├─ [type:0][phrase_id:3][lang:0] → BuilderEntry   # "1st street" at 300 coordinates
+//! └─ ... millions more phrases
+//! ```
+//!
+//! Each `BuilderEntry` contains:
+//! - All grid coordinates for that phrase
+//! - Grouped by relevance/score for efficient querying
+//! - Organized by Morton-encoded coordinates for spatial locality
+
+use crate::storage::common::BuilderEntry;
 use crate::storage::{
-    encode_relev_score, pack_feature_id, GridEntry, GridKey, MortonCode, PackedFeatureId, PhraseId,
-    RelevScore, Result, StorageError, TypeMarker,
+    encode_relev_score, pack_feature_id, GridEntry, GridKey, PhraseId, Result, StorageError,
+    TypeMarker,
 };
 use itertools::Itertools;
 use morton::interleave_morton;
 use rocksdb::{Options, DB};
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
-use std::collections::{hash_map, BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-
-/// Nested storage structure for efficient grouping and compression.
-///
-/// Organizes GridEntries in a three-level hierarchy optimized for both
-/// storage efficiency and query performance.
-///
-///
-/// # Level 1: RelevScore (u8)
-///
-/// Combined relevance and score key that groups entries by importance:
-/// - Upper 4 bits: Relevance (0-3, quantized from 0.4-1.0)
-/// - Lower 4 bits: Score (0-15, truncated from 0-255)
-///
-/// **Benefits:**
-/// - Pre-sorted results: High relevance/score entries come first
-/// - Better compression: Similar values grouped together
-/// - Query optimization: Can skip low-relevance groups entirely
-///
-/// # Level 2: Morton Code (u32)
-///
-/// Spatially-encoded coordinate that preserves locality:
-/// - Interleaves x and y coordinate bits
-/// - Nearby points get nearby morton codes
-/// - Enables efficient spatial range queries
-///
-/// **Future:** Will be replaced with S2 CellID (u64) for hierarchical queries
-///
-/// # Level 3: PackedFeatureId (SmallVec<[u32; 4]>)
-///
-/// List of features at this RelevScore and coordinate:
-/// - Each u32 packs: feature_id (24 bits) + source_phrase_hash (8 bits)
-/// - SmallVec stores ≤4 items inline (no heap allocation)
-/// - Spills to heap only when >4 features (uncommon)
-///
-/// **Packing format:**
-/// text
-/// u32: [feature_id: 24 bits][source_phrase_hash: 8 bits]
-///
-/// Example:
-/// feature_id = 12345 (0x003039)
-/// hash = 42 (0x2A)
-/// packed = (12345 << 8) | 42 = 0x00303A2A
-///
-/// **Why pack together?**
-/// When a feature generates multiple phrases ("main", "street", "main street"),
-/// the hash identifies they came from the same source phrase, enabling
-/// deduplication during query processing.
-///
-/// **Why SmallVec:**
-/// Most coordinates have 1-4 features, so SmallVec avoids heap allocations
-/// for the common case while still supporting unlimited features when needed.
-///
-#[derive(Serialize, Deserialize)]
-struct BuilderEntry {
-    inner: HashMap<RelevScore, HashMap<MortonCode, SmallVec<[PackedFeatureId; 4]>>>,
-}
-impl BuilderEntry {
-    fn new() -> Self {
-        BuilderEntry {
-            inner: HashMap::new(),
-        }
-    }
-}
 
 /// Extends a BuilderEntry with the given values.
 fn extend_entries(builder_entry: &mut BuilderEntry, values: Vec<GridEntry>) {
@@ -202,7 +171,8 @@ impl GridStoreBuilder {
     /// builder.append(&key, batch3)?;   // Keep adding
     /// ```
     pub fn append(&mut self, key: &GridKey, values: Vec<GridEntry>) -> Result<()> {
-        let to_append = self.data
+        let to_append = self
+            .data
             .entry(key.clone())
             .or_insert_with(BuilderEntry::new);
         extend_entries(to_append, values);
@@ -295,17 +265,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
 
-        let key = GridKey { phrase_id: 1, lang_set: 0 };
-        builder.insert(&key, vec![
-            GridEntry {
-                relev: 0.8,
-                score: 255,
-                x: 100,
-                y: 200,
-                id: 1,
-                source_phrase_hash: 0,
-            }
-        ]).unwrap();
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0,
+        };
+        builder
+            .insert(
+                &key,
+                vec![GridEntry {
+                    relev: 0.8,
+                    score: 255,
+                    x: 100,
+                    y: 200,
+                    id: 1,
+                    source_phrase_hash: 0,
+                }],
+            )
+            .unwrap();
 
         assert_eq!(builder.data.len(), 1);
         builder.finish().unwrap();
@@ -316,11 +292,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
 
-        let key = GridKey { phrase_id: 1, lang_set: 0 };
-        builder.insert(&key, vec![
-            GridEntry { relev: 0.8, score: 255, x: 100, y: 200, id: 1, source_phrase_hash: 0 },
-            GridEntry { relev: 1.0, score: 200, x: 101, y: 201, id: 2, source_phrase_hash: 1 },
-        ]).unwrap();
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0,
+        };
+        builder
+            .insert(
+                &key,
+                vec![
+                    GridEntry {
+                        relev: 0.8,
+                        score: 255,
+                        x: 100,
+                        y: 200,
+                        id: 1,
+                        source_phrase_hash: 0,
+                    },
+                    GridEntry {
+                        relev: 1.0,
+                        score: 200,
+                        x: 101,
+                        y: 201,
+                        id: 2,
+                        source_phrase_hash: 1,
+                    },
+                ],
+            )
+            .unwrap();
 
         assert_eq!(builder.data.len(), 1);
         let entry = builder.data.get(&key).unwrap();
@@ -334,14 +332,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
 
-        let key = GridKey { phrase_id: 1, lang_set: 0 };
-        builder.insert(&key, vec![
-            GridEntry { relev: 0.8, score: 255, x: 100, y: 200, id: 1, source_phrase_hash: 0 },
-        ]).unwrap();
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0,
+        };
+        builder
+            .insert(
+                &key,
+                vec![GridEntry {
+                    relev: 0.8,
+                    score: 255,
+                    x: 100,
+                    y: 200,
+                    id: 1,
+                    source_phrase_hash: 0,
+                }],
+            )
+            .unwrap();
 
-        builder.append(&key, vec![
-            GridEntry { relev: 0.8, score: 255, x: 100, y: 200, id: 2, source_phrase_hash: 1 },
-        ]).unwrap();
+        builder
+            .append(
+                &key,
+                vec![GridEntry {
+                    relev: 0.8,
+                    score: 255,
+                    x: 100,
+                    y: 200,
+                    id: 2,
+                    source_phrase_hash: 1,
+                }],
+            )
+            .unwrap();
 
         assert_eq!(builder.data.len(), 1);
         builder.finish().unwrap();

@@ -68,7 +68,7 @@ fn decode_value(value: &[u8]) -> Result<Vec<GridEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::GridStoreBuilder;
+    use crate::storage::{truncate_score, GridStoreBuilder};
     use tempfile;
 
     #[test]
@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(retrieved.len(), 1);
         let r = &retrieved[0];
         assert_eq!(r.relev, entry.relev);
-        assert_eq!(r.score, entry.score & 0x0F); // Score truncated to 4 bits
+        assert_eq!(r.score, truncate_score(entry.score));
         assert_eq!(r.x, entry.x);
         assert_eq!(r.y, entry.y);
         assert_eq!(r.id, entry.id);

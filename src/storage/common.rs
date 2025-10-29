@@ -260,6 +260,23 @@ pub fn decode_relev_score(relev_score: RelevScore) -> (f64, u8) {
     (relev, score)
 }
 
+/// Truncates score to 4 bits (0-15) as stored in RelevScore.
+///
+/// Scores are compressed from u8 (0-255) to 4 bits during encoding.
+/// This is a lossy compression - only the lower 4 bits are preserved.
+///
+/// # Examples
+///
+/// assert_eq!(truncate_score(15), 15);   // Preserved
+/// assert_eq!(truncate_score(16), 0);    // Truncated
+/// assert_eq!(truncate_score(128), 0);   // Truncated
+/// assert_eq!(truncate_score(255), 15);  // Truncated to max
+///
+#[inline]
+pub fn truncate_score(score: u8) -> u8 {
+    score & 0x0F
+}
+
 /// Packed feature identifier with source phrase hash for deduplication.
 ///
 /// Combines feature ID (24 bits) and source phrase hash (8 bits) into a single u32.
@@ -360,7 +377,7 @@ impl BuilderEntry {
 #[cfg(test)]
 mod tests {
     use super::{encode_relev_score, relev_float_to_int};
-    use crate::storage::{decode_relev_score, pack_feature_id, unpack_feature_id};
+    use crate::storage::{decode_relev_score, pack_feature_id, truncate_score, unpack_feature_id};
 
     #[test]
     fn test_relev_float_to_int() {
@@ -373,6 +390,20 @@ mod tests {
         assert_eq!(relev_float_to_int(0.9), 3);
         assert_eq!(relev_float_to_int(1.0), 3);
         assert_eq!(relev_float_to_int(4.0), 3);
+    }
+
+    #[test]
+    fn test_truncate_score() {
+        // Preserved values (0-15)
+        assert_eq!(truncate_score(0), 0);
+        assert_eq!(truncate_score(15), 15);
+
+        // Truncated values
+        assert_eq!(truncate_score(16), 0);
+        assert_eq!(truncate_score(128), 0);
+        assert_eq!(truncate_score(255), 15);
+        assert_eq!(truncate_score(240), 0);
+        assert_eq!(truncate_score(31), 15);
     }
 
     #[test]

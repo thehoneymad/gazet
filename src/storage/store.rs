@@ -3,9 +3,13 @@
 //! Use `GridStore` at query time to retrieve spatial phrase data.
 //! See `GridStoreBuilder` for creating indexes.
 
-use crate::storage::{decode_boundaries, decode_relev_score, encode_relev_score, pack_feature_id, unpack_feature_id, BuilderEntry, GridEntry, GridKey, PhraseId, Result, StorageError, TypeMarker, BOUNDS_KEY};
+use crate::storage::{
+    decode_boundaries, decode_relev_score, encode_relev_score, pack_feature_id, unpack_feature_id,
+    BuilderEntry, GridEntry, GridKey, MatchEntry, MatchKey, MatchOpts, MatchPhrase, PhraseId,
+    Result, StorageError, TypeMarker, BOUNDS_KEY,
+};
 use morton::deinterleave_morton;
-use rocksdb::{Options, DB};
+use rocksdb::{Direction, IteratorMode, Options, DB};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -43,6 +47,129 @@ impl GridStore {
             }
             None => Ok(None),
         }
+    }
+
+    /// Queries the grid store for matching phrases with optional spatial filtering.
+    ///
+    /// Returns an iterator of matching entries, supporting both exact phrase lookups
+    /// and range queries. Automatically uses prefix bins when available for efficient
+    /// range queries.
+    ///
+    /// # Arguments
+    /// * `match_key` - Query specification (phrase range and language filter)
+    /// * `match_opts` - Spatial filtering options (bbox, proximity, zoom)
+    ///
+    /// # Returns
+    /// Iterator of [`MatchEntry`] containing grid entries with language match metadata.
+    ///
+    /// # Query Types
+    ///
+    /// ## Exact Query
+    /// ```ignore
+    /// let match_key = MatchKey {
+    ///     match_phrase: MatchPhrase::Exact(42),
+    ///     lang_set: 0,
+    /// };
+    /// ```
+    /// Looks up a single phrase_id.
+    ///
+    /// ## Range Query
+    /// ```ignore
+    /// let match_key = MatchKey {
+    ///     match_phrase: MatchPhrase::Range { start: 100, end: 200 },
+    ///     lang_set: 0,
+    /// };
+    /// ```
+    /// Looks up multiple phrase_ids. Uses prefix bins if range aligns with bin boundaries.
+    ///
+    /// # Prefix Bin Optimization
+    ///
+    /// Range queries automatically use prefix bins when:
+    /// - Both `start` and `end` exist in `bin_boundaries`
+    /// - Enables O(1) bin lookups instead of O(n) individual phrase lookups
+    ///
+    /// # Error Handling
+    ///
+    /// Corrupted database entries are silently skipped to allow partial results.
+    /// TODO: Add proper error logging for skipped entries.
+    ///
+    /// # Spatial Filtering
+    ///
+    /// TODO: Implement spatial filtering using `match_opts` (bbox, proximity, zoom).
+    /// Currently returns all matching entries regardless of spatial constraints.
+    pub fn get_matching(
+        &self,
+        match_key: &MatchKey,
+        _match_opts: &MatchOpts, // TODO: Implement spatial filtering
+    ) -> Result<Vec<MatchEntry>> {
+        // Determine query strategy: exact vs range, prefix bins vs individual lookups
+        let (fetch_start, fetch_end, fetch_type_marker) = match match_key.match_phrase {
+            // Convert exact lookup to half-open range [id, id+1) for uniform iteration logic
+            MatchPhrase::Exact(id) => (id, id + 1, TypeMarker::SinglePhrase),
+            
+            MatchPhrase::Range { start, end } => {
+                // Use prefix bins only if query range exactly aligns with bin boundaries
+                // Partial bin fetches are not supported - bins are pre-aggregated at write time
+                if self.bin_boundaries.contains(&start) && self.bin_boundaries.contains(&end) {
+                    (start, end, TypeMarker::PrefixBin)
+                } else {
+                    (start, end, TypeMarker::SinglePhrase)
+                }
+            }
+        };
+
+        // Normalize query to range format for uniform iteration
+        let mut range_key = match_key.clone();
+        range_key.match_phrase = MatchPhrase::Range {
+            start: fetch_start,
+            end: fetch_end,
+        };
+
+        // Create starting database key for iteration
+        let start_key = range_key.to_start_key(fetch_type_marker)?;
+        
+        // Clone range_key for use in both closures (moved into each)
+        let range_key_for_take = range_key.clone();
+        let range_key_for_filter = range_key;
+        
+        // Iterate from start_key forward, stopping when keys no longer match range
+        let db_iter = self
+            .db
+            .iterator(IteratorMode::From(&start_key, Direction::Forward))
+            .take_while(move |result| {
+                match result {
+                    Ok((key, _value)) => {
+                        // Stop iteration when key falls outside our phrase_id range
+                        range_key_for_take
+                            .matches_key(fetch_type_marker, key)
+                            .unwrap_or(false)
+                    }
+                    Err(_) => false, // Stop on database error
+                }
+            });
+
+        // Filter by language and decode values
+        let results = db_iter
+            .filter_map(move |result| {
+                // Skip corrupted entries silently (TODO: add proper error logging)
+                let (key, value) = result.ok()?;
+                
+                // Check if entry's language overlaps with query language filter
+                let matches_language = range_key_for_filter.matches_language(&key).ok()?;
+                
+                // Decode stored BuilderEntry to flat Vec<GridEntry>
+                let entries = decode_value(&value).ok()?;
+
+                // Wrap each GridEntry with language match metadata
+                Some(entries.into_iter().map(move |grid_entry| MatchEntry {
+                    grid_entry,
+                    matches_language,
+                }))
+            })
+            .flatten()
+            .collect(); // TODO: Return iterator instead of Vec (see README for investigation)
+            
+        Ok(results)
     }
 }
 

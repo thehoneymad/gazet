@@ -1,7 +1,64 @@
-use byteorder::{BigEndian, WriteBytesExt};
+//! Core data structures for spatial phrase storage and querying.
+//!
+//! This module defines the fundamental types used throughout the storage layer.
+//! These types are re-exported through the parent `storage` module.
+//!
+//! # Key Types
+//!
+//! ## Storage Types
+//! - [`GridKey`]: Database key combining phrase_id + language for indexing
+//! - [`GridEntry`]: Spatial data representing a feature at a location
+//! - [`BuilderEntry`]: Optimized write format grouping entries by relevance/score
+//!
+//! ## Query Types  
+//! - [`MatchKey`]: Query specification with phrase range and language filter
+//! - [`MatchPhrase`]: Exact phrase or range of phrases to match
+//! - [`MatchOpts`]: Spatial filters (bounding box, proximity, zoom level)
+//! - [`MatchEntry`]: Query result wrapping GridEntry with language match metadata
+//!
+//! # Database Key Format
+//!
+//! Keys are serialized to bytes for RocksDB storage:
+//!
+//! ```text
+//! [type_marker][phrase_id (4 bytes)][lang_set (0-16 bytes)]
+//!      ↑              ↑                      ↑
+//!    byte 0       bytes 1-4              bytes 5+
+//!   (0 or 1)    (big-endian)         (compressed)
+//! ```
+//!
+//! - **Type marker**: 0 = SinglePhrase, 1 = PrefixBin
+//! - **Phrase ID**: 32-bit identifier (big-endian for lexicographic ordering)
+//! - **Language set**: Variable-length (0 bytes = all languages, 1-16 bytes = specific languages)
+//!
+//! # Query Flow
+//!
+//! ```text
+//! User Query
+//!     ↓
+//! MatchKey { phrase: Range{100,200}, lang_set: 0b0001 }
+//!     ↓
+//! RocksDB Iterator (scan keys 100-199)
+//!     ↓
+//! matches_key() → filter by phrase_id range
+//!     ↓
+//! matches_language() → filter by language overlap
+//!     ↓
+//! decode_value() → GridEntry
+//!     ↓
+//! wrap in MatchEntry { grid_entry, matches_language: true }
+//!     ↓
+//! Return to caller
+//! ```
+//!
+//! See [`MatchKey::matches_key()`] and [`MatchKey::matches_language()`] for
+//! the key parsing logic used during iteration.
+
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
+use crate::storage::Result;
 
 /// Unique identifier for a phrase (supports up to 4 billion phrases).
 pub type PhraseId = u32;
@@ -94,15 +151,25 @@ pub enum TypeMarker {
 /// Key for indexing phrases in the spatial grid store.
 ///
 /// Combines a phrase identifier with a language set to enable
-/// multi-language phrase lookups. Identical to carmen-core's GridKey.
-///
-/// # Fields
-/// * `phrase_id` - Unique identifier for the phrase (supports up to 4 billion phrases)
-/// * `lang_set` - 128-bit bitfield representing supported languages (empty = all languages)
+/// multi-language phrase lookups.
 #[derive(Serialize, Deserialize, Debug, PartialOrd, Ord, PartialEq, Eq, Clone)]
 pub struct GridKey {
+    ///  Unique identifier for the phrase (supports up to 4 billion phrases)
     pub phrase_id: PhraseId,
+    /// 128-bit bitfield representing supported languages (empty = all languages)
     pub lang_set: LanguageSet,
+}
+
+/// Entry returned from matching queries with language metadata.
+///
+/// Wraps a GridEntry with query-specific information about whether
+/// the entry matches the requested language set.
+#[derive(Debug, PartialEq, Clone)]
+pub struct MatchEntry {
+    /// The underlying grid entry with spatial and relevance data
+    pub grid_entry: GridEntry,
+    /// Whether this entry matches the query's language filter
+    pub matches_language: bool,
 }
 
 impl GridKey {
@@ -190,6 +257,98 @@ pub enum MatchPhrase {
 pub struct MatchKey {
     pub match_phrase: MatchPhrase,
     pub lang_set: LanguageSet,
+}
+
+impl MatchKey {
+    // Design Note: Query-Centric Key Matching
+    //
+    // These methods parse database keys on-demand during iteration rather than
+    // creating a separate DbKey type. This design choice optimizes for the common
+    // case: filtering many keys quickly during range queries.
+    //
+    // Benefits:
+    // - Lazy parsing: Only extract phrase_id if type_marker matches
+    // - Minimal allocations: Work directly with byte slices
+    // - Clear intent: "Does this query match this key?" vs "Parse key, then check"
+    //
+    // Alternative (not used): DbKey wrapper with upfront parsing would be useful
+    // if keys were passed around or inspected in multiple places, but adds overhead
+    // for the single-use case of iteration filtering.
+
+    /// Checks if a database key matches this query's phrase criteria.
+    ///
+    /// Validates both the type marker and phrase_id range.
+    ///
+    /// # Arguments
+    /// * `type_marker` - Expected key type (SinglePhrase or PrefixBin)
+    /// * `db_key` - Raw database key bytes to check
+    ///
+    /// # Returns
+    /// * `Ok(true)` - Key matches the query
+    /// * `Ok(false)` - Key doesn't match
+    /// * `Err` - Failed to parse key bytes
+    pub fn matches_key(&self, type_marker: TypeMarker, db_key: &[u8]) -> Result<bool> {
+        // 1. Check type_marker matches
+        if db_key[0] != type_marker as u8 {
+            return Ok(false);
+        }
+
+        // 2. Extract phrase_id from bytes 1-4
+        let key_phrase_id = (&db_key[1..]).read_u32::<BigEndian>()?;
+
+        // 3. Check if it matches our query
+        Ok(match self.match_phrase {
+            MatchPhrase::Exact(id) => key_phrase_id == id,
+            MatchPhrase::Range { start, end } => start <= key_phrase_id && key_phrase_id < end,
+        })
+    }
+
+    /// Checks if a database key's language overlaps with this query's language filter.
+    ///
+    /// Uses bitwise AND to check if any language bits are shared between
+    /// the query and the key. Empty language sets match everything.
+    ///
+    /// # Arguments
+    /// * `db_key` - Raw database key bytes to check
+    ///
+    /// # Returns
+    /// * `Ok(true)` - Languages overlap or key has no language restriction
+    /// * `Ok(false)` - No language overlap
+    /// * `Err` - Failed to parse key bytes
+    pub fn matches_language(&self, db_key: &[u8]) -> Result<bool> {
+        let key_lang_partial = &db_key[5..];
+
+        // Empty language = matches everything (special case in encoding)
+        if key_lang_partial.is_empty() {
+            return Ok(true);
+        }
+
+        // Left-pad with zeros to convert variable-length (1-16 bytes) to fixed u128 (16 bytes)
+        // Example with 1 byte [0b11111111]:
+        //   [0b11111111] → [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0b11111111]
+        //    ↑ 1 byte       ←──────    15 zeros  ──────→  ↑ copied here
+        let mut key_lang_full = [0u8; 16];
+        key_lang_full[(16 - key_lang_partial.len())..].copy_from_slice(key_lang_partial);
+
+        let key_lang_set = u128::from_be_bytes(key_lang_full);
+
+        // Check if any language bits overlap using bitwise AND
+        // Example: query=0b0011 (EN+ES) & key=0b0001 (EN) = 0b0001 ≠ 0 → match!
+        Ok(self.lang_set & key_lang_set != 0)
+    }
+
+    pub fn to_start_key(&self, type_marker: TypeMarker) -> Result<Vec<u8>> {
+        let mut key = Vec::with_capacity(5); // type_marker (1) + phrase_id (4)
+        key.push(type_marker as u8);
+
+        let start = match self.match_phrase {
+            MatchPhrase::Exact(phrase_id) => phrase_id,
+            MatchPhrase::Range { start, .. } => start,
+        };
+
+        key.write_u32::<BigEndian>(start)?;
+        Ok(key)
+    }
 }
 
 /// Query options for spatial filtering and proximity ranking.
@@ -458,14 +617,6 @@ where
     K: Sized + Copy + PartialEq,
     F: FnMut(&T::Item) -> K,
 {
-    // TODO: Implement this
-    // Hints:
-    // 1. Track current key with Option<K>
-    // 2. Accumulate items in Vec<T::Item> for current group
-    // 3. When key changes, return previous group and start new one
-    // 4. Use std::iter::from_fn to create the iterator
-    // 5. Handle end of iterator by returning final group
-
     let mut curr_key: Option<K> = None;
     let mut running_group: Vec<T::Item> = Vec::new();
     let mut done = false;

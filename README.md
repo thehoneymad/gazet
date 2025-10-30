@@ -12,20 +12,29 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 
 ## Current Status
 
-🚧 **Early Development** - Basic storage layer implementation in progress
+🚧 **Phase 2: Query Support** - Basic range queries implemented, spatial filtering next
 
-### Completed
-- ✅ Core data structures (GridKey, MatchKey, MatchOpts, GridEntry)
+### Completed (Phase 1)
+- ✅ Core data structures (GridKey, MatchKey, MatchOpts, MatchEntry, GridEntry)
 - ✅ Error handling with backend-agnostic StorageError
 - ✅ Type aliases (PhraseId, LanguageSet, FeatureId, RelevScore)
 - ✅ Relevance/score encoding functions with unit tests
 - ✅ GridKey serialization to database format
 - ✅ GridStoreBuilder with optimized BuilderEntry structure
-- ✅ Module organization (common, error, builder)
+- ✅ Prefix bin support for efficient range queries
+- ✅ GridStore reader with exact lookups
+- ✅ Boundary encoding/decoding with ~BOUNDS metadata
+- ✅ Module organization (common, error, builder, store)
+
+### Completed (Phase 2)
+- ✅ Query types (MatchKey, MatchPhrase, MatchOpts, MatchEntry)
+- ✅ Range query implementation with get_matching()
+- ✅ Prefix bin optimization for aligned ranges
+- ✅ Language filtering during iteration
 
 ### In Progress
-- 🔨 BuilderEntry value serialization
-- 🔨 GridStore reader implementation
+- 🔨 Query tests (exact phrase, range queries)
+- 🔨 Spatial filtering (bbox, proximity, zoom)
 
 ## Key Concepts
 
@@ -87,11 +96,20 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
   - [x] Load ~BOUNDS in GridStore::new()
   - [x] Store bin_boundaries in GridStore struct
   - [x] Add tests for boundary reading
-- [ ] Implement range query support
-  - [ ] Add MatchKey type (exact phrase or range)
-  - [ ] Add MatchOpts type (bbox, proximity, zoom)
-  - [ ] Implement get_matching() with iterator
-  - [ ] Use PrefixBin entries for range queries
+- [x] Implement basic range query support
+  - [x] Add MatchKey type (exact phrase or range)
+  - [x] Add MatchPhrase enum (Exact/Range)
+  - [x] Add MatchOpts type (bbox, proximity, zoom)
+  - [x] Add MatchEntry type (query result with metadata)
+  - [x] Implement get_matching() basic version
+  - [x] Use PrefixBin entries for range queries
+  - [x] Language filtering during iteration
+- [ ] Complete get_matching() implementation
+  - [ ] Add max_values parameter for result limiting
+  - [ ] Implement priority queue (MinMaxHeap) for top-K results
+  - [ ] Return iterator instead of Vec (solve lifetime issues)
+  - [ ] Study carmen-core's streaming_get_matching() approach
+  - [ ] Use std::iter::from_fn pattern to avoid lifetime issues
 - [ ] Implement spatial matching (adds zoom, bboxes, coalesce_radius to GridStore)
   - [ ] Add new_with_options() constructor
   - [ ] Bounding box queries
@@ -104,7 +122,12 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 - [ ] Write query tests
   - [ ] Test exact phrase matching
   - [ ] Test range queries (prefix matching)
+  - [ ] Test prefix bin optimization
+  - [ ] Test language filtering
   - [ ] Test spatial filtering
+- [ ] Add error logging
+  - [ ] Log corrupted database entries during iteration
+  - [ ] Log skipped entries in get_matching()
 
 ### Phase 3: Component-Aware Processing
 - [ ] Define ComponentType enum

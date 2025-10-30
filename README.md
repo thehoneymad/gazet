@@ -58,17 +58,36 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
   - [x] extend_entries() helper with batch grouping
   - [x] Serialize BuilderEntry to database value format (bincode)
   - [x] Write to RocksDB via finish()
+- [x] Implement prefix bin support
+  - [x] load_bin_boundaries() - Configure bin boundaries
+  - [x] group_by_owned() - Group phrases by bin with owned values
+  - [x] copy_entries() - Aggregate BuilderEntry data for bins
+  - [x] Update finish() to create PrefixBin entries
+  - [x] Store ~BOUNDS metadata in database
 - [x] Write basic insertion tests
   - [x] Test single entry insertion
   - [x] Test multiple entries for same key
   - [x] Test append merges entries
+- [x] Write prefix bin tests
+  - [x] Test finish with no boundaries
+  - [x] Test finish with single boundary
+  - [x] Test finish with multiple boundaries
+  - [x] Test finish with multiple languages
+  - [x] Test copy_entries aggregation
 - [x] Implement GridStore reader
   - [x] Create GridStore struct with read-only + mmap
   - [x] Implement get() method for exact lookups
   - [x] Add roundtrip tests (write→read verification)
-  - [ ] Add iterator support for range queries (deferred to Phase 2)
 
 ### Phase 2: Query Support (Current)
+- [ ] Read bin boundaries from database
+  - [ ] Load ~BOUNDS in GridStore::new()
+  - [ ] Store bin_boundaries in GridStore struct
+- [ ] Implement range query support
+  - [ ] Add MatchKey type (exact phrase or range)
+  - [ ] Add MatchOpts type (bbox, proximity, zoom)
+  - [ ] Implement get_matching() with iterator
+  - [ ] Use PrefixBin entries for range queries
 - [ ] Implement spatial matching
   - [ ] Bounding box queries
   - [ ] Proximity-based ranking

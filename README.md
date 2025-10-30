@@ -12,41 +12,23 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 
 ## Current Status
 
-🚧 **Phase 2: Query Support** - Basic range queries implemented, spatial filtering next
+🚧 **Phase 2: Query Support** - In Progress
 
-### Completed (Phase 1)
-- ✅ Core data structures (GridKey, MatchKey, MatchOpts, MatchEntry, GridEntry)
-- ✅ Error handling with backend-agnostic StorageError
-- ✅ Type aliases (PhraseId, LanguageSet, FeatureId, RelevScore)
-- ✅ Relevance/score encoding functions with unit tests
-- ✅ GridKey serialization to database format
-- ✅ GridStoreBuilder with optimized BuilderEntry structure
-- ✅ Prefix bin support for efficient range queries
-- ✅ GridStore reader with exact lookups
-- ✅ Boundary encoding/decoding with ~BOUNDS metadata
-- ✅ Module organization (common, error, builder, store)
-
-### Completed (Phase 2)
-- ✅ Query types (MatchKey, MatchPhrase, MatchOpts, MatchEntry)
-- ✅ Range query implementation with get_matching()
-- ✅ Prefix bin optimization for aligned ranges
-- ✅ Language filtering during iteration
-
-### In Progress
-- 🔨 Query tests (exact phrase, range queries)
+- 🔨 Complete get_matching() implementation (priority queue, max_values, iterator return)
+- 🔨 Query tests (exact phrase, range queries, prefix bins)
 - 🔨 Spatial filtering (bbox, proximity, zoom)
 
-## Key Concepts
+## Documentation
 
-**Storage Backend:** RocksDB for local storage with fast key-value lookups, efficient range queries, and LZ4 compression. Future backends: S3 (distribution), MBTiles (SQLite-based).
+View comprehensive API documentation with rustdoc:
 
-**Key Types:**
-- `PhraseId` - Unique identifier for phrases (u32, supports 4B phrases)
-- `LanguageSet` - 128-bit bitfield for language support
-- `FeatureId` - Unique identifier for features (u32, truncated to 24 bits in storage)
-- `RelevScore` - Combined relevance+score key (u8, 4 bits each)
-- `GridKey` - Phrase + language combination for indexing
-- `GridEntry` - Feature at a location with relevance scoring
+```bash
+# Public API documentation
+cargo doc --no-deps --open
+
+# Include private modules and implementation details
+cargo doc --document-private-items --no-deps --open
+```
 
 ## Engineering Tasks
 
@@ -194,12 +176,6 @@ cargo build --release
 # Generate documentation
 cargo doc --open
 ```
-
-## Documentation
-
-For detailed design documentation, see:
-- [Cascade Design Document](../Stuff/src/Things/cascade/cascade_design.md) - Complete architectural specification
-- API Documentation: Run `cargo doc --open` to view rustdoc
 
 ## References
 

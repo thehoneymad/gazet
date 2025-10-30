@@ -78,20 +78,26 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
   - [x] Create GridStore struct with read-only + mmap
   - [x] Implement get() method for exact lookups
   - [x] Add roundtrip tests (write→read verification)
+- [x] Abstract boundary encoding/decoding
+  - [x] Add encode_boundaries() and decode_boundaries()
+  - [x] Add comprehensive tests for boundary serialization
 
 ### Phase 2: Query Support (Current)
-- [ ] Read bin boundaries from database
-  - [ ] Load ~BOUNDS in GridStore::new()
-  - [ ] Store bin_boundaries in GridStore struct
+- [x] Read bin boundaries from database
+  - [x] Load ~BOUNDS in GridStore::new()
+  - [x] Store bin_boundaries in GridStore struct
+  - [x] Add tests for boundary reading
 - [ ] Implement range query support
   - [ ] Add MatchKey type (exact phrase or range)
   - [ ] Add MatchOpts type (bbox, proximity, zoom)
   - [ ] Implement get_matching() with iterator
   - [ ] Use PrefixBin entries for range queries
-- [ ] Implement spatial matching
+- [ ] Implement spatial matching (adds zoom, bboxes, coalesce_radius to GridStore)
+  - [ ] Add new_with_options() constructor
   - [ ] Bounding box queries
   - [ ] Proximity-based ranking
   - [ ] Zoom level coordination
+  - [ ] Note: Fields added incrementally as features are implemented
 - [ ] Add coalescing/stacking logic
   - [ ] Spatial overlap detection
   - [ ] Relevance score combination

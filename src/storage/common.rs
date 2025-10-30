@@ -374,10 +374,98 @@ impl BuilderEntry {
     }
 }
 
+/// Groups consecutive items by key, collecting each group into an owned Vec.
+///
+/// Unlike `itertools::chunk_by` which returns borrowed groups, this function
+/// returns owned `Vec<T::Item>` for each group, allowing the caller to store
+/// or return groups while continuing iteration.
+///
+/// # Why needed
+///
+/// Used in `finish()` to group phrases by bin boundary. As we iterate through
+/// sorted phrases, when we cross a bin boundary, we need to return all phrases
+/// from the previous bin (as an owned Vec) before starting the next bin.
+///
+/// # Example
+/// ignore
+/// let data = vec![(1, "a"), (1, "b"), (2, "c"), (2, "d")];
+/// let grouped = group_by_owned(data.into_iter(), |(k, )| k);
+/// // Yields: (1, vec![(1, "a"), (1, "b")]), (2, vec![(2, "c"), (2, "d")])
+///
+
+pub fn group_by_owned<T: Iterator, F, K>(
+    mut it: T,
+    mut key: F,
+) -> impl Iterator<Item = (K, Vec<T::Item>)>
+where
+    K: Sized + Copy + PartialEq,
+    F: FnMut(&T::Item) -> K,
+{
+    // TODO: Implement this
+    // Hints:
+    // 1. Track current key with Option<K>
+    // 2. Accumulate items in Vec<T::Item> for current group
+    // 3. When key changes, return previous group and start new one
+    // 4. Use std::iter::from_fn to create the iterator
+    // 5. Handle end of iterator by returning final group
+
+    let mut curr_key: Option<K> = None;
+    let mut running_group: Vec<T::Item> = Vec::new();
+    let mut done = false;
+
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+
+        loop {
+            let item = it.next();
+            if let Some(val) = item {
+                let k = key(&val);
+                match &curr_key {
+                    None => {
+                        curr_key = Some(k);
+                        running_group.push(val);
+                    }
+                    Some(o) => {
+                        // This means the key has changed from the current key
+                        if *o != k {
+                            let mut out_vec = Vec::new();
+                            std::mem::swap(&mut out_vec, &mut running_group);
+                            let to_return = Some((*o, out_vec));
+
+                            running_group.push(val);
+                            curr_key = Some(k);
+
+                            return to_return;
+                        } else {
+                            // Same key - add to current group
+                            running_group.push(val);
+                        }
+                    }
+                }
+            } else {
+                // This means the iteration is complete, and there are no more items
+                return match &curr_key {
+                    None => None,
+                    Some(o) => {
+                        let mut out_vec = Vec::new();
+                        std::mem::swap(&mut out_vec, &mut running_group);
+                        let to_return = Some((*o, out_vec));
+
+                        done = true;
+                        to_return
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{encode_relev_score, relev_float_to_int};
-    use crate::storage::{decode_relev_score, pack_feature_id, truncate_score, unpack_feature_id};
+    use crate::storage::{decode_relev_score, group_by_owned, pack_feature_id, truncate_score, unpack_feature_id};
 
     #[test]
     fn test_relev_float_to_int() {
@@ -537,5 +625,88 @@ mod tests {
         let original = (999999, 123);
         let packed = pack_feature_id(original.0, original.1);
         assert_eq!(unpack_feature_id(packed), original);
+    }
+
+    #[test]
+    fn test_group_by_owned() {
+        let data = vec![(1, "a"), (1, "b"), (2, "c"), (2, "d"), (3, "e")];
+        let grouped: Vec<_> = group_by_owned(data.into_iter(), |(k, _)| *k).collect();
+
+        assert_eq!(grouped.len(), 3);
+        assert_eq!(grouped[0].0, 1);
+        assert_eq!(grouped[0].1, vec![(1, "a"), (1, "b")]);
+        assert_eq!(grouped[1].0, 2);
+        assert_eq!(grouped[1].1, vec![(2, "c"), (2, "d")]);
+        assert_eq!(grouped[2].0, 3);
+        assert_eq!(grouped[2].1, vec![(3, "e")]);
+    }
+
+    #[test]
+    fn test_group_by_owned_empty() {
+        // Empty iterator should return no groups
+        let data: Vec<(i32, &str)> = vec![];
+        let grouped: Vec<_> = group_by_owned(data.into_iter(), |(k, _)| *k).collect();
+        assert_eq!(grouped.len(), 0);
+    }
+
+    #[test]
+    fn test_group_by_owned_single_item() {
+        // Single item should create one group with one item
+        let data = vec![(1, "a")];
+        let grouped: Vec<_> = group_by_owned(data.into_iter(), |(k, _)| *k).collect();
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].0, 1);
+        assert_eq!(grouped[0].1, vec![(1, "a")]);
+    }
+
+    #[test]
+    fn test_group_by_owned_all_same_key() {
+        // All items with same key should create one group
+        let data = vec![(1, "a"), (1, "b"), (1, "c"), (1, "d")];
+        let grouped: Vec<_> = group_by_owned(data.into_iter(), |(k, _)| *k).collect();
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].0, 1);
+        assert_eq!(grouped[0].1.len(), 4);
+    }
+
+    #[test]
+    fn test_group_by_owned_all_different_keys() {
+        // Each item with different key should create separate groups
+        let data = vec![(1, "a"), (2, "b"), (3, "c"), (4, "d")];
+        let grouped: Vec<_> = group_by_owned(data.into_iter(), |(k, _)| *k).collect();
+
+        assert_eq!(grouped.len(), 4);
+        for (i, (key, group)) in grouped.iter().enumerate() {
+            assert_eq!(*key, (i + 1) as i32);
+            assert_eq!(group.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_group_by_owned_alternating_keys() {
+        // Keys that alternate should create separate groups
+        let data = vec![(1, "a"), (2, "b"), (1, "c"), (2, "d")];
+        let grouped: Vec<_> = group_by_owned(data.into_iter(), |(k, _)| *k).collect();
+
+        // Should create 4 groups because keys alternate
+        assert_eq!(grouped.len(), 4);
+        assert_eq!(grouped[0].0, 1);
+        assert_eq!(grouped[1].0, 2);
+        assert_eq!(grouped[2].0, 1);
+        assert_eq!(grouped[3].0, 2);
+    }
+
+    #[test]
+    fn test_group_by_owned_multiple_calls() {
+        // Calling next() multiple times after exhaustion should keep returning None
+        let data = vec![(1, "a")];
+        let mut iter = group_by_owned(data.into_iter(), |(k, _)| *k);
+
+        assert!(iter.next().is_some());
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none()); // Should still be None
+        assert!(iter.next().is_none()); // Should still be None
     }
 }

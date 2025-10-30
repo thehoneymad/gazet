@@ -32,13 +32,15 @@
 
 use crate::storage::common::BuilderEntry;
 use crate::storage::{
-    encode_relev_score, pack_feature_id, GridEntry, GridKey, PhraseId, Result, StorageError,
-    TypeMarker,
+    encode_relev_score, group_by_owned, pack_feature_id, GridEntry, GridKey, LanguageSet, PhraseId,
+    Result, StorageError, TypeMarker,
 };
 use itertools::Itertools;
 use morton::interleave_morton;
+use rocksdb::statistics::Ticker::NonLastLevelReadBytes;
 use rocksdb::{Options, DB};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -65,6 +67,24 @@ fn extend_entries(builder_entry: &mut BuilderEntry, values: Vec<GridEntry>) {
                     e.get_mut().extend(packed_ids);
                 }
             }
+        }
+    }
+}
+
+/// Copies all entries from source to destination BuilderEntry.
+///
+/// Used for prefix bin aggregation - copies GridEntries from individual
+/// phrase entries into the aggregated PrefixBin entry
+fn copy_entries(source_entry: &BuilderEntry, target_entry: &mut BuilderEntry) {
+    for (relev_score, values) in source_entry.inner.iter() {
+        let rs_entry = target_entry
+            .inner
+            .entry(*relev_score)
+            .or_insert_with(HashMap::new);
+
+        for (morton, ids) in values.iter() {
+            let morton_entry = rs_entry.entry(*morton).or_insert_with(SmallVec::new);
+            morton_entry.extend(ids.iter().cloned());
         }
     }
 }
@@ -179,6 +199,45 @@ impl GridStoreBuilder {
         Ok(())
     }
 
+    /// Sets bin boundaries for prefix bin optimization.
+    ///
+    /// Prefix bins enable efficient range queries (autocomplete) by aggregating
+    /// multiple phrase entries into larger bins. Instead of querying thousands of
+    /// individual phrases starting with "San", a single PrefixBin entry contains
+    /// all of them.
+    ///
+    /// # How Prefix Bins Work
+    ///
+    /// Given boundaries `[1000, 2000, 3000]`, the system creates bins:
+    /// - Bin 1000: phrases 0-999
+    /// - Bin 2000: phrases 1000-1999
+    /// - Bin 3000: phrases 2000-2999
+    /// - Implicit: phrases 3000+ (no upper bound)
+    ///
+    /// Each bin gets a PrefixBin entry (TypeMarker::PrefixBin) that aggregates
+    /// all GridEntries from phrases in that range.
+    ///
+    /// # Query Example
+    ///
+    /// Without bins: Query "San*" → iterate phrases 5000-5500 individually (500 lookups)
+    /// With bins: Query "San*" → lookup bin 5000 (1 lookup, pre-aggregated data)
+    ///
+    /// # When to Use
+    ///
+    /// - Autocomplete/prefix search is required
+    /// - Index has >10k phrases (smaller indexes don't benefit)
+    /// - Bin size should be ~100-1000 phrases for optimal performance
+    ///
+    /// # Example
+    /// ```ignore
+    /// builder.load_bin_boundaries(vec![1000, 2000, 3000])?;
+    /// // finish() will now create PrefixBin entries at these boundaries
+    /// ```
+    pub fn load_bin_boundaries(&mut self, bin_boundaries: Vec<PhraseId>) -> Result<()> {
+        self.bin_boundaries = bin_boundaries;
+        Ok(())
+    }
+
     /// Finalizes the store by writing all accumulated data to RocksDB.
     ///
     /// # Serialization Strategy
@@ -211,11 +270,59 @@ impl GridStoreBuilder {
 
         let db = DB::open(&opts, self.path)?;
 
-        for (grid_key, builder_entry) in self.data {
-            let db_key = grid_key.to_db_key(TypeMarker::SinglePhrase);
-            let db_value = Self::serialize_value(&builder_entry)?;
-            db.put(&db_key, &db_value)?;
+        // Group phrases by bin boundary
+        let mut bin_seq = self.bin_boundaries.iter().cloned().peekable();
+        let mut current_bin = None;
+        let mut next_boundary = 0u32;
+
+        let grouped = group_by_owned(self.data.into_iter(), |(key, _value)| {
+            while key.phrase_id >= next_boundary {
+                current_bin = bin_seq.next();
+                next_boundary = *(bin_seq.peek().unwrap_or(&u32::MAX));
+            }
+            current_bin
+        });
+
+        // Process each bin group
+        for (group_id, group_value) in grouped {
+            let mut lang_set_map: HashMap<LanguageSet, BuilderEntry> = HashMap::new();
+
+            // Write individual phrases and accumulate into bin
+            for (grid_key, value) in group_value.into_iter() {
+                // Write individual phrase entry
+                let db_key = grid_key.to_db_key(TypeMarker::SinglePhrase);
+                let db_value = Self::serialize_value(&value)?;
+                db.put(&db_key, &db_value)?;
+
+                // Accumulate into bin aggregate
+                let grouped_entry = lang_set_map
+                    .entry(grid_key.lang_set)
+                    .or_insert_with(BuilderEntry::new);
+
+                copy_entries(&value, grouped_entry);
+            }
+
+            // Write aggregated bin entries
+            if let Some(group_id) = group_id {
+                for (lang_set, builder_entry) in lang_set_map.into_iter() {
+                    let group_key = GridKey {
+                        phrase_id: group_id,
+                        lang_set,
+                    };
+                    let db_key = group_key.to_db_key(TypeMarker::PrefixBin);
+                    let db_value = Self::serialize_value(&builder_entry)?;
+                    db.put(&db_key, &db_value)?;
+                }
+            }
         }
+
+        // Write bin boundaries metadata
+        let mut encoded_boundaries: Vec<u8> = Vec::with_capacity(self.bin_boundaries.len() * 4);
+        for boundary in self.bin_boundaries {
+            encoded_boundaries.extend_from_slice(&boundary.to_le_bytes());
+        }
+
+        db.put(b"~BOUNDS", &encoded_boundaries)?;
         Ok(())
     }
 
@@ -366,5 +473,216 @@ mod tests {
 
         assert_eq!(builder.data.len(), 1);
         builder.finish().unwrap();
+    }
+
+    #[test]
+    fn test_finish_with_no_boundaries_writes_only_individual_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Add some phrases
+        for i in 0..5 {
+            let key = GridKey {
+                phrase_id: i,
+                lang_set: 0,
+            };
+            builder
+                .insert(
+                    &key,
+                    vec![GridEntry {
+                        relev: 1.0,
+                        score: 10,
+                        x: i as u16,
+                        y: 1,
+                        id: i,
+                        source_phrase_hash: 0,
+                    }],
+                )
+                .unwrap();
+        }
+
+        builder.finish().unwrap();
+
+        let db = rocksdb::DB::open_default(dir.path()).unwrap();
+
+        let mut count = 0;
+        let iter = db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item.unwrap();
+            if key[0] == TypeMarker::SinglePhrase as u8 {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn test_finish_with_boundaries_creates_prefix_bins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Add 10 phrases
+        for i in 0..10 {
+            let key = GridKey {
+                phrase_id: i,
+                lang_set: 0,
+            };
+            builder
+                .insert(
+                    &key,
+                    vec![GridEntry {
+                        relev: 1.0,
+                        score: 10,
+                        x: i as u16,
+                        y: 1,
+                        id: i,
+                        source_phrase_hash: 0,
+                    }],
+                )
+                .unwrap();
+        }
+
+        // Set boundaries: bin at 5
+        builder.load_bin_boundaries(vec![5]).unwrap();
+        builder.finish().unwrap();
+
+        // Verify database
+        let db = rocksdb::DB::open_default(dir.path()).unwrap();
+
+        let mut individual_count = 0;
+        let mut bin_count = 0;
+        let iter = db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item.unwrap();
+            if key.len() > 0 {
+                match key[0] {
+                    0 => individual_count += 1,  // SinglePhrase
+                    1 => bin_count += 1,          // PrefixBin
+                    _ => {}
+                }
+            }
+        }
+
+        assert_eq!(individual_count, 10, "Should have 10 individual entries");
+        assert_eq!(bin_count, 1, "Should have 1 bin entry");
+
+        // Verify ~BOUNDS exists
+        let bounds = db.get(b"~BOUNDS").unwrap();
+        assert!(bounds.is_some());
+    }
+
+    #[test]
+    fn test_finish_with_multiple_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Add 15 phrases
+        for i in 0..15 {
+            let key = GridKey {
+                phrase_id: i,
+                lang_set: 0,
+            };
+            builder
+                .insert(
+                    &key,
+                    vec![GridEntry {
+                        relev: 1.0,
+                        score: 10,
+                        x: i as u16,
+                        y: 1,
+                        id: i,
+                        source_phrase_hash: 0,
+                    }],
+                )
+                .unwrap();
+        }
+
+        // Set boundaries: bins at 5, 10
+        builder.load_bin_boundaries(vec![5, 10]).unwrap();
+        builder.finish().unwrap();
+
+        let db = DB::open_default(dir.path()).unwrap();
+
+        let mut bin_count = 0;
+        let iter = db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item.unwrap();
+            if key.len() > 0 && key[0] == 1 {
+                bin_count += 1;
+            }
+        }
+
+        assert_eq!(bin_count, 2, "Should have 2 bin entries");
+    }
+
+    #[test]
+    fn test_finish_with_multiple_languages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Add phrases with different languages
+        for i in 0..5 {
+            for lang in [0, 1] {
+                let key = GridKey {
+                    phrase_id: i,
+                    lang_set: lang,
+                };
+                builder
+                    .insert(
+                        &key,
+                        vec![GridEntry {
+                            relev: 1.0,
+                            score: 10,
+                            x: i as u16,
+                            y: 1,
+                            id: i,
+                            source_phrase_hash: 0,
+                        }],
+                    )
+                    .unwrap();
+            }
+        }
+
+        builder.load_bin_boundaries(vec![3]).unwrap();
+        builder.finish().unwrap();
+
+        let db = DB::open_default(dir.path()).unwrap();
+
+        let mut bin_count = 0;
+        let iter = db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item.unwrap();
+            if key.len() > 0 && key[0] == 1 {
+                bin_count += 1;
+            }
+        }
+
+        // Should have 2 bin entries (one per language)
+        assert_eq!(bin_count, 2, "Should have 2 bin entries (one per language)");
+    }
+
+    #[test]
+    fn test_copy_entries_aggregates_data() {
+        use smallvec::SmallVec;
+        
+        let mut source = BuilderEntry::new();
+        let mut dest = BuilderEntry::new();
+
+        // Add some data to source
+        source.inner.insert(
+            0xFF,
+            {
+                let mut map = HashMap::new();
+                let vec: SmallVec<[u32; 4]> = smallvec::smallvec![1, 2, 3];
+                map.insert(123, vec);
+                map
+            },
+        );
+
+        copy_entries(&source, &mut dest);
+
+        assert!(dest.inner.contains_key(&0xFF));
+        let expected: SmallVec<[u32; 4]> = smallvec::smallvec![1, 2, 3];
+        assert_eq!(dest.inner[&0xFF][&123], expected);
     }
 }

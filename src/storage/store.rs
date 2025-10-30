@@ -3,17 +3,19 @@
 //! Use `GridStore` at query time to retrieve spatial phrase data.
 //! See `GridStoreBuilder` for creating indexes.
 
-use crate::storage::{
-    decode_relev_score, encode_relev_score, pack_feature_id, unpack_feature_id, BuilderEntry,
-    GridEntry, GridKey, Result, StorageError, TypeMarker,
-};
+use crate::storage::{decode_boundaries, decode_relev_score, encode_relev_score, pack_feature_id, unpack_feature_id, BuilderEntry, GridEntry, GridKey, PhraseId, Result, StorageError, TypeMarker, BOUNDS_KEY};
 use morton::deinterleave_morton;
 use rocksdb::{Options, DB};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Read-only interface to a GridStore database.
 pub struct GridStore {
     db: DB,
+    /// Bin boundaries for prefix bin optimization.
+    /// Contains phrase_id values where prefix bins start.
+    /// Empty if no prefix bins were created during indexing.
+    pub bin_boundaries: HashSet<PhraseId>,
 }
 
 impl GridStore {
@@ -22,7 +24,14 @@ impl GridStore {
         opts.set_allow_mmap_reads(true);
 
         let db = DB::open_for_read_only(&opts, path, false)?;
-        Ok(GridStore { db })
+
+        // Read bin boundaries from database
+        let bin_boundaries: HashSet<PhraseId> = match db.get(BOUNDS_KEY)? {
+            Some(entry) => decode_boundaries(entry.as_ref()).into_iter().collect(),
+            None => HashSet::new(),
+        };
+
+        Ok(GridStore { db, bin_boundaries })
     }
 
     pub fn get(&self, key: &GridKey) -> Result<Option<Vec<GridEntry>>> {
@@ -158,5 +167,73 @@ mod tests {
         assert_eq!(r.y, entry.y);
         assert_eq!(r.id, entry.id);
         assert_eq!(r.source_phrase_hash, entry.source_phrase_hash);
+    }
+
+    #[test]
+    fn test_gridstore_reads_bin_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Add some phrases
+        for i in 0..10 {
+            let key = GridKey {
+                phrase_id: i,
+                lang_set: 0,
+            };
+            builder
+                .insert(
+                    &key,
+                    vec![GridEntry {
+                        relev: 1.0,
+                        score: 10,
+                        x: i as u16,
+                        y: 1,
+                        id: i,
+                        source_phrase_hash: 0,
+                    }],
+                )
+                .unwrap();
+        }
+
+        // Set boundaries
+        builder.load_bin_boundaries(vec![3, 7]).unwrap();
+        builder.finish().unwrap();
+
+        // Open store and verify boundaries were read
+        let store = GridStore::new(dir.path()).unwrap();
+        assert_eq!(store.bin_boundaries.len(), 2);
+        assert!(store.bin_boundaries.contains(&3));
+        assert!(store.bin_boundaries.contains(&7));
+    }
+
+    #[test]
+    fn test_gridstore_empty_boundaries_when_none_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0,
+        };
+        builder
+            .insert(
+                &key,
+                vec![GridEntry {
+                    relev: 1.0,
+                    score: 10,
+                    x: 1,
+                    y: 1,
+                    id: 1,
+                    source_phrase_hash: 0,
+                }],
+            )
+            .unwrap();
+
+        // Don't set boundaries
+        builder.finish().unwrap();
+
+        // Open store and verify boundaries are empty
+        let store = GridStore::new(dir.path()).unwrap();
+        assert_eq!(store.bin_boundaries.len(), 0);
     }
 }

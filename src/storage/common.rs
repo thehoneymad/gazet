@@ -23,6 +23,63 @@ pub const ALL_LANGUAGES: LanguageSet = u128::MAX;
 /// Language set value indicating no specific languages.
 pub const NO_LANGUAGES: LanguageSet = 0;
 
+/// Database key for storing bin boundaries metadata.
+///
+/// This special key stores the phrase_id boundaries used for prefix bin aggregation.
+///
+/// # Format
+/// Array of u32 values encoded as **little-endian** bytes (4 bytes per boundary).
+///
+/// # Endianness Note
+/// Uses little-endian (unlike GridKey which uses big-endian) because:
+/// - No ordering/comparison needed (just data storage)
+/// - Slightly faster on most CPUs (x86, ARM are little-endian)
+/// - Consistent with carmen-core implementation
+pub const BOUNDS_KEY: &[u8] = b"~BOUNDS";
+
+/// Encodes bin boundaries into bytes for database storage.
+///
+/// Each boundary (u32) is encoded as 4 little-endian bytes.
+///
+/// # Example
+/// ```ignore
+/// let boundaries = vec![1000, 2000, 3000];
+/// let encoded = encode_boundaries(&boundaries);
+/// // Result: [232, 3, 0, 0, 208, 7, 0, 0, 184, 11, 0, 0]
+/// //          └─  1000  ─┘  └─  2000  ─┘  └─   3000  ─┘
+/// ```
+pub fn encode_boundaries(boundaries: &[PhraseId]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(boundaries.len() * 4);
+    for boundary in boundaries {
+        encoded.extend_from_slice(&boundary.to_le_bytes());
+    }
+    encoded
+}
+
+/// Decodes bin boundaries from database bytes.
+///
+/// Reads 4-byte chunks as little-endian u32 values.
+/// Skips incomplete chunks (not divisible by 4) for safety.
+///
+/// # Example
+/// ```ignore
+/// let encoded = vec![232, 3, 0, 0, 208, 7, 0, 0];
+/// let boundaries = decode_boundaries(&encoded);
+/// // Result: vec![1000, 2000]
+/// ```
+pub fn decode_boundaries(encoded: &[u8]) -> Vec<PhraseId> {
+    encoded
+        .chunks(4)
+        .filter_map(|chunk| {
+            if chunk.len() == 4 {
+                Some(u32::from_le_bytes(chunk.try_into().unwrap()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Type marker for database key entries.
 ///
 /// Distinguishes between exact phrase lookups and prefix bin aggregations.
@@ -456,7 +513,7 @@ where
                         done = true;
                         to_return
                     }
-                }
+                };
             }
         }
     })
@@ -464,8 +521,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_relev_score, relev_float_to_int};
-    use crate::storage::{decode_relev_score, group_by_owned, pack_feature_id, truncate_score, unpack_feature_id};
+    use super::*;
 
     #[test]
     fn test_relev_float_to_int() {
@@ -708,5 +764,55 @@ mod tests {
         assert!(iter.next().is_none());
         assert!(iter.next().is_none()); // Should still be None
         assert!(iter.next().is_none()); // Should still be None
+    }
+
+    #[test]
+    fn test_encode_boundaries() {
+        // Test empty
+        let boundaries = vec![];
+        let encoded = encode_boundaries(&boundaries);
+        assert_eq!(encoded.len(), 0);
+
+        // Test single boundary
+        let boundaries = vec![1000];
+        let encoded = encode_boundaries(&boundaries);
+        assert_eq!(encoded.len(), 4);
+        assert_eq!(encoded, vec![232, 3, 0, 0]); // 1000 in little-endian
+
+        // Test multiple boundaries
+        let boundaries = vec![1000, 2000, 3000];
+        let encoded = encode_boundaries(&boundaries);
+        assert_eq!(encoded.len(), 12); // 3 * 4 bytes
+    }
+
+    #[test]
+    fn test_decode_boundaries() {
+        // Test empty
+        let encoded = vec![];
+        let boundaries = decode_boundaries(&encoded);
+        assert_eq!(boundaries.len(), 0);
+
+        // Test single boundary
+        let encoded = vec![232, 3, 0, 0]; // 1000 in little-endian
+        let boundaries = decode_boundaries(&encoded);
+        assert_eq!(boundaries, vec![1000]);
+
+        // Test multiple boundaries
+        let encoded = vec![232, 3, 0, 0, 208, 7, 0, 0, 184, 11, 0, 0];
+        let boundaries = decode_boundaries(&encoded);
+        assert_eq!(boundaries, vec![1000, 2000, 3000]);
+
+        // Test incomplete chunk (should skip)
+        let encoded = vec![232, 3, 0, 0, 208, 7, 0]; // Last chunk only 3 bytes
+        let boundaries = decode_boundaries(&encoded);
+        assert_eq!(boundaries, vec![1000]); // Only first complete chunk
+    }
+
+    #[test]
+    fn test_encode_decode_boundaries_roundtrip() {
+        let original = vec![100, 500, 1000, 5000, 10000];
+        let encoded = encode_boundaries(&original);
+        let decoded = decode_boundaries(&encoded);
+        assert_eq!(original, decoded);
     }
 }

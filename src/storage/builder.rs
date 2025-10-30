@@ -32,12 +32,11 @@
 
 use crate::storage::common::BuilderEntry;
 use crate::storage::{
-    encode_relev_score, group_by_owned, pack_feature_id, GridEntry, GridKey, LanguageSet, PhraseId,
-    Result, StorageError, TypeMarker,
+    encode_boundaries, encode_relev_score, group_by_owned, pack_feature_id, GridEntry, GridKey,
+    LanguageSet, PhraseId, Result, StorageError, TypeMarker, BOUNDS_KEY,
 };
 use itertools::Itertools;
 use morton::interleave_morton;
-use rocksdb::statistics::Ticker::NonLastLevelReadBytes;
 use rocksdb::{Options, DB};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -317,12 +316,8 @@ impl GridStoreBuilder {
         }
 
         // Write bin boundaries metadata
-        let mut encoded_boundaries: Vec<u8> = Vec::with_capacity(self.bin_boundaries.len() * 4);
-        for boundary in self.bin_boundaries {
-            encoded_boundaries.extend_from_slice(&boundary.to_le_bytes());
-        }
-
-        db.put(b"~BOUNDS", &encoded_boundaries)?;
+        let encoded_boundaries = encode_boundaries(&self.bin_boundaries);
+        db.put(BOUNDS_KEY, &encoded_boundaries)?;
         Ok(())
     }
 
@@ -567,7 +562,7 @@ mod tests {
         assert_eq!(bin_count, 1, "Should have 1 bin entry");
 
         // Verify ~BOUNDS exists
-        let bounds = db.get(b"~BOUNDS").unwrap();
+        let bounds = db.get(BOUNDS_KEY).unwrap();
         assert!(bounds.is_some());
     }
 

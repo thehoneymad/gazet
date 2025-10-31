@@ -17,15 +17,6 @@ use std::cmp::Ordering;
 use smallvec::SmallVec;
 use interval_heap::IntervalHeap;
 
-/// Read-only interface to a GridStore database.
-pub struct GridStore {
-    db: DB,
-    /// Bin boundaries for prefix bin optimization.
-    /// Contains phrase_id values where prefix bins start.
-    /// Empty if no prefix bins were created during indexing.
-    pub bin_boundaries: HashSet<PhraseId>,
-}
-
 struct QueueElement<T: Iterator<Item = MatchEntry>> {
     next_entry: MatchEntry,
     entry_iter: T,
@@ -64,8 +55,33 @@ impl<T: Iterator<Item=MatchEntry>> QueueElement<T> {
     }
 }
 
+/// Default zoom level for GridStore (low detail, suitable for testing)
+const DEFAULT_ZOOM: u16 = 6;
+
+/// Default coalesce radius in miles (0.0 = no proximity search)
+const DEFAULT_COALESCE_RADIUS: f64 = 0.0;
+
+/// Read-only interface to a GridStore database.
+pub struct GridStore {
+    db: DB,
+    /// Bin boundaries for prefix bin optimization.
+    /// Contains phrase_id values where prefix bins start.
+    /// Empty if no prefix bins were created during indexing.
+    pub bin_boundaries: HashSet<PhraseId>,
+    pub zoom: u16,
+    pub coalesce_radius: f64,
+}
+
 impl GridStore {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::new_with_options(path, DEFAULT_ZOOM, DEFAULT_COALESCE_RADIUS)
+    }
+
+    pub fn new_with_options<P: AsRef<Path>>(
+        path: P,
+        zoom: u16,
+        coalesce_radius: f64,
+    ) -> Result<Self> {
         let mut opts = Options::default();
         opts.set_allow_mmap_reads(true);
 
@@ -77,7 +93,7 @@ impl GridStore {
             None => HashSet::new(),
         };
 
-        Ok(GridStore { db, bin_boundaries })
+        Ok(GridStore { db, bin_boundaries, zoom, coalesce_radius })
     }
 
     pub fn get(&self, key: &GridKey) -> Result<Option<Vec<GridEntry>>> {

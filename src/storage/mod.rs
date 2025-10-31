@@ -19,9 +19,11 @@
 mod builder;
 mod common;
 mod error;
+mod spatial;
 mod store;
 
 pub use builder::GridStoreBuilder;
 pub use common::*;
 pub use error::*;
+pub use spatial::*;
 pub use store::GridStore;

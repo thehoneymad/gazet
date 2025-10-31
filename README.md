@@ -190,9 +190,10 @@ cargo doc --open
 
 ## References
 
-- [Carmen Geocoder](https://github.com/mapbox/carmen)
-- [Carmen Core (Rust)](https://github.com/mapbox/carmen-core)
-- [S2 Geometry Library](http://s2geometry.io/)
+Cascade builds upon geocoding concepts pioneered by the Carmen project:
+- [Carmen Geocoder](https://github.com/mapbox/carmen) - Original JavaScript implementation
+- [Carmen Core (Rust)](https://github.com/mapbox/carmen-core) - Rust port with performance optimizations
+- [S2 Geometry Library](http://s2geometry.io/) - Hierarchical spatial indexing
 
 ## License
 

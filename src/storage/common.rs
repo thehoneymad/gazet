@@ -91,7 +91,6 @@ pub const NO_LANGUAGES: LanguageSet = 0;
 /// Uses little-endian (unlike GridKey which uses big-endian) because:
 /// - No ordering/comparison needed (just data storage)
 /// - Slightly faster on most CPUs (x86, ARM are little-endian)
-/// - Consistent with carmen-core implementation
 pub const BOUNDS_KEY: &[u8] = b"~BOUNDS";
 
 /// Encodes bin boundaries into bytes for database storage.

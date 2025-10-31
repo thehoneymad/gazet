@@ -10,11 +10,12 @@ use crate::storage::{
 };
 use morton::deinterleave_morton;
 use rocksdb::{Direction, IteratorMode, Options, DB};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use ordered_float::OrderedFloat;
 use std::cmp::Ordering;
 use smallvec::SmallVec;
+use interval_heap::IntervalHeap;
 
 /// Read-only interface to a GridStore database.
 pub struct GridStore {
@@ -190,7 +191,7 @@ impl GridStore {
                 }
             });
 
-        let mut pri_queue = BinaryHeap::<QueueElement<_>>::new();
+        let mut pri_queue = IntervalHeap::<QueueElement<_>>::new();
         for result in db_iter {
             let (key, value) = result.ok().unwrap();
             let matches_language = range_key_for_filter.matches_language(&key).ok().unwrap();
@@ -207,7 +208,20 @@ impl GridStore {
             });
 
             if let Some(next_entry) = entry_iter.next() {
-                pri_queue.push(QueueElement { next_entry, entry_iter });
+                let queue_element = QueueElement { next_entry, entry_iter };
+                
+                if pri_queue.len() >= max_values {
+                    if let Some(worst_entry) = pri_queue.min() {
+                        if worst_entry >= &queue_element {
+                            continue;
+                        } else {
+                            pri_queue.pop_min();
+                            pri_queue.push(queue_element);
+                        }
+                    }
+                } else {
+                    pri_queue.push(queue_element);
+                }
             }
         }
 
@@ -216,7 +230,7 @@ impl GridStore {
             if count >= max_values {
                 return None;
             }
-            pri_queue.pop().map(|mut queue_elem| {
+            pri_queue.pop_max().map(|mut queue_elem| {
                 count += 1;
                 let result = queue_elem.next_entry;
                 if let Some(next_entry) = queue_elem.entry_iter.next() {

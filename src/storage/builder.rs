@@ -38,7 +38,6 @@ use crate::storage::{
 use itertools::Itertools;
 use morton::interleave_morton;
 use rocksdb::{Options, DB};
-use serde::Serialize;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};

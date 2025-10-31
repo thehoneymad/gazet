@@ -4,14 +4,17 @@
 //! See `GridStoreBuilder` for creating indexes.
 
 use crate::storage::{
-    decode_boundaries, decode_relev_score, encode_relev_score, pack_feature_id, unpack_feature_id,
-    BuilderEntry, GridEntry, GridKey, MatchEntry, MatchKey, MatchOpts, MatchPhrase, PhraseId,
+    decode_boundaries, decode_relev_score, unpack_feature_id,
+    GridEntry, GridKey, MatchEntry, MatchKey, MatchOpts, MatchPhrase, PhraseId,
     Result, StorageError, TypeMarker, BOUNDS_KEY,
 };
 use morton::deinterleave_morton;
 use rocksdb::{Direction, IteratorMode, Options, DB};
-use std::collections::HashSet;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::Path;
+use ordered_float::OrderedFloat;
+use std::cmp::Ordering;
+use smallvec::SmallVec;
 
 /// Read-only interface to a GridStore database.
 pub struct GridStore {
@@ -20,6 +23,44 @@ pub struct GridStore {
     /// Contains phrase_id values where prefix bins start.
     /// Empty if no prefix bins were created during indexing.
     pub bin_boundaries: HashSet<PhraseId>,
+}
+
+struct QueueElement<T: Iterator<Item = MatchEntry>> {
+    next_entry: MatchEntry,
+    entry_iter: T,
+}
+
+impl<T: Iterator<Item=MatchEntry>> Eq for QueueElement<T> {}
+
+impl<T: Iterator<Item=MatchEntry>> PartialEq<Self> for QueueElement<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.sort_key() == other.sort_key()
+    }
+}
+
+impl<T: Iterator<Item=MatchEntry>> PartialOrd<Self> for QueueElement<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: Iterator<Item=MatchEntry>> Ord for QueueElement<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.sort_key().cmp(&other.sort_key())
+    }
+}
+
+impl<T: Iterator<Item=MatchEntry>> QueueElement<T> {
+    fn sort_key(&self) -> (OrderedFloat<f64>, OrderedFloat<f64>, bool, u16, u16, u32) {
+        (
+            OrderedFloat(self.next_entry.grid_entry.relev),
+            OrderedFloat(self.next_entry.scoredist),
+            self.next_entry.matches_language,
+            self.next_entry.grid_entry.x,
+            self.next_entry.grid_entry.y,
+            self.next_entry.grid_entry.id,
+        )
+    }
 }
 
 impl GridStore {
@@ -101,12 +142,13 @@ impl GridStore {
         &self,
         match_key: &MatchKey,
         _match_opts: &MatchOpts, // TODO: Implement spatial filtering
-    ) -> Result<Vec<MatchEntry>> {
+        max_values: usize,
+    ) -> Result<impl Iterator<Item=MatchEntry>> {
         // Determine query strategy: exact vs range, prefix bins vs individual lookups
         let (fetch_start, fetch_end, fetch_type_marker) = match match_key.match_phrase {
             // Convert exact lookup to half-open range [id, id+1) for uniform iteration logic
             MatchPhrase::Exact(id) => (id, id + 1, TypeMarker::SinglePhrase),
-            
+
             MatchPhrase::Range { start, end } => {
                 // Use prefix bins only if query range exactly aligns with bin boundaries
                 // Partial bin fetches are not supported - bins are pre-aggregated at write time
@@ -127,11 +169,11 @@ impl GridStore {
 
         // Create starting database key for iteration
         let start_key = range_key.to_start_key(fetch_type_marker)?;
-        
+
         // Clone range_key for use in both closures (moved into each)
         let range_key_for_take = range_key.clone();
         let range_key_for_filter = range_key;
-        
+
         // Iterate from start_key forward, stopping when keys no longer match range
         let db_iter = self
             .db
@@ -148,38 +190,58 @@ impl GridStore {
                 }
             });
 
-        // Filter by language and decode values
-        let results = db_iter
-            .filter_map(move |result| {
-                // Skip corrupted entries silently (TODO: add proper error logging)
-                let (key, value) = result.ok()?;
-                
-                // Check if entry's language overlaps with query language filter
-                let matches_language = range_key_for_filter.matches_language(&key).ok()?;
-                
-                // Decode stored BuilderEntry to flat Vec<GridEntry>
-                let entries = decode_value(&value).ok()?;
+        let mut pri_queue = BinaryHeap::<QueueElement<_>>::new();
+        for result in db_iter {
+            let (key, value) = result.ok().unwrap();
+            let matches_language = range_key_for_filter.matches_language(&key).ok().unwrap();
+            let entries = decode_value(&value).ok().unwrap();
 
-                // Wrap each GridEntry with language match metadata
-                Some(entries.into_iter().map(move |grid_entry| MatchEntry {
+            let mut entry_iter = entries.into_iter().map(move |grid_entry| {
+                let score = grid_entry.score;
+                MatchEntry {
                     grid_entry,
                     matches_language,
-                }))
+                    distance: 0.0,
+                    scoredist: score as f64,
+                }
+            });
+
+            if let Some(next_entry) = entry_iter.next() {
+                pri_queue.push(QueueElement { next_entry, entry_iter });
+            }
+        }
+
+        let mut count = 0;
+        let iter = std::iter::from_fn(move || {
+            if count >= max_values {
+                return None;
+            }
+            pri_queue.pop().map(|mut queue_elem| {
+                count += 1;
+                let result = queue_elem.next_entry;
+                if let Some(next_entry) = queue_elem.entry_iter.next() {
+                    queue_elem.next_entry = next_entry;
+                    pri_queue.push(queue_elem);
+                }
+                result
             })
-            .flatten()
-            .collect(); // TODO: Return iterator instead of Vec (see README for investigation)
-            
-        Ok(results)
+        });
+
+        Ok(iter)
     }
 }
 
 /// Deserializes stored BuilderEntry back to flat Vec<GridEntry>.
+///
+/// The stored format is a Vec of (RelevScore, HashMap<MortonCode, SmallVec<PackedFeatureId>>)
+/// sorted by RelevScore in descending order (high relevance first).
 fn decode_value(value: &[u8]) -> Result<Vec<GridEntry>> {
-    let builder_entry: BuilderEntry =
+    let sorted_entries: Vec<(u8, HashMap<u32, SmallVec<[u32; 4]>>)> =
         bincode::deserialize(value).map_err(|e| StorageError::Serialization(e.to_string()))?;
+    
     let mut entries = Vec::new();
 
-    for (relev_score, morton_map) in builder_entry.inner {
+    for (relev_score, morton_map) in sorted_entries {
         let (relev, score) = decode_relev_score(relev_score);
 
         for (morton, packed_feature_ids) in morton_map {
@@ -362,5 +424,73 @@ mod tests {
         // Open store and verify boundaries are empty
         let store = GridStore::new(dir.path()).unwrap();
         assert_eq!(store.bin_boundaries.len(), 0);
+    }
+
+    #[test]
+    fn test_get_matching_basic_range_query() {
+        // Step 1: Create temp directory
+        let dir = tempfile::tempdir().unwrap();
+
+        // Step 2: Build test data
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Insert entries for phrase_id 1 with language 1
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 1,
+        };
+
+        let entries = vec![
+            GridEntry {
+                relev: 1.0,
+                score: 7,
+                x: 10,
+                y: 20,
+                id: 100,
+                source_phrase_hash: 0,
+            },
+            GridEntry {
+                relev: 1.0,
+                score: 5,
+                x: 11,
+                y: 21,
+                id: 101,
+                source_phrase_hash: 0,
+            },
+        ];
+
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        // Step 3: Query the data
+        let store = GridStore::new(dir.path()).unwrap();
+
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Exact(1),  // Query for phrase_id 1
+            lang_set: 1,  // Match language 1
+        };
+
+        let match_opts = MatchOpts {
+            bbox: None,
+            proximity: None,
+            zoom: 16,
+        };
+
+        let results: Vec<MatchEntry> = store
+            .get_matching(&match_key, &match_opts, 10)  // max_values = 10
+            .unwrap()
+            .collect();
+
+        assert_eq!(results.len(), 2, "Should return 2 entries");
+
+        // First result should be highest score (7)
+        assert_eq!(results[0].grid_entry.id, 100);
+        assert_eq!(results[0].grid_entry.score, 7);
+        assert_eq!(results[0].matches_language, true);
+
+        // Second result should be lower score (5)
+        assert_eq!(results[1].grid_entry.id, 101);
+        assert_eq!(results[1].grid_entry.score, 5);
+        assert_eq!(results[1].matches_language, true);
     }
 }

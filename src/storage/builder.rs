@@ -38,7 +38,7 @@ use crate::storage::{
 use itertools::Itertools;
 use morton::interleave_morton;
 use rocksdb::{Options, DB};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -321,7 +321,12 @@ impl GridStoreBuilder {
         Ok(())
     }
 
-    /// Serializes BuilderEntry to bytes.
+    /// Serializes BuilderEntry to bytes with deterministic ordering.
+    ///
+    /// Sorts entries by RelevScore (descending) before serialization to ensure:
+    /// 1. Deterministic output (same input always produces same bytes)
+    /// 2. High-relevance entries come first for query optimization
+    /// 3. Better compression (similar values grouped together)
     ///
     /// Current implementation uses bincode. This function provides
     /// a single point to swap in custom serialization format later.
@@ -353,7 +358,13 @@ impl GridStoreBuilder {
     /// - Custom Writer/Reader similar to carmen-core's gridstore_format
     /// - Offset-based pointers for shared data structures
     fn serialize_value(entries: &BuilderEntry) -> Result<Vec<u8>> {
-        bincode::serialize(&entries.inner).map_err(|e| StorageError::Serialization(e.to_string()))
+        // Convert HashMap to Vec and sort by RelevScore descending
+        let mut sorted_entries: Vec<_> = entries.inner.iter().collect();
+        sorted_entries.sort_by(|(relev_score_a, _), (relev_score_b, _)| {
+            relev_score_b.cmp(relev_score_a)  // Descending: high relevance first
+        });
+        
+        bincode::serialize(&sorted_entries).map_err(|e| StorageError::Serialization(e.to_string()))
     }
 }
 

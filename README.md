@@ -14,9 +14,15 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 
 🚧 **Phase 2: Query Support** - In Progress
 
-- 🔨 Complete get_matching() implementation (priority queue, max_values, iterator return)
-- 🔨 Query tests (exact phrase, range queries, prefix bins)
-- 🔨 Spatial filtering (bbox, proximity, zoom)
+Recent completion:
+- ✅ Streaming iterator with BinaryHeap priority queue
+- ✅ Deterministic ordering via write-time sorting
+- ✅ Basic range query test
+
+Still needed:
+- ❌ Spatial filtering (bbox, proximity, zoom)
+- ❌ Comprehensive query tests
+- ❌ Coalescing/stacking logic
 
 ## Documentation
 
@@ -86,13 +92,18 @@ cargo doc --document-private-items --no-deps --open
   - [x] Implement get_matching() basic version
   - [x] Use PrefixBin entries for range queries
   - [x] Language filtering during iteration
-- [ ] Complete get_matching() implementation
-  - [ ] Add max_values parameter for result limiting
-  - [ ] Implement priority queue (MinMaxHeap) for top-K results
-  - [ ] Return iterator instead of Vec (solve lifetime issues)
-  - [ ] Study carmen-core's streaming_get_matching() approach
-  - [ ] Use std::iter::from_fn pattern to avoid lifetime issues
+- [x] Complete get_matching() implementation
+  - [x] Add max_values parameter for result limiting
+  - [x] Implement priority queue (BinaryHeap) for top-K results
+  - [x] Return streaming iterator (std::iter::from_fn pattern)
+  - [x] Deterministic ordering via write-time sorting
+  - [x] Basic range query test
 - [ ] Implement spatial matching (adds zoom, bboxes, coalesce_radius to GridStore)
+  - [ ] Add new_with_options() constructor
+  - [ ] Bounding box queries
+  - [ ] Proximity-based ranking
+  - [ ] Zoom level coordination
+  - [ ] Note: Fields added incrementally as features are implemented
   - [ ] Add new_with_options() constructor
   - [ ] Bounding box queries
   - [ ] Proximity-based ranking

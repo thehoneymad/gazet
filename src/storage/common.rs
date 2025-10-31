@@ -164,12 +164,16 @@ pub struct GridKey {
 ///
 /// Wraps a GridEntry with query-specific information about whether
 /// the entry matches the requested language set.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, PartialOrd)]
 pub struct MatchEntry {
     /// The underlying grid entry with spatial and relevance data
     pub grid_entry: GridEntry,
     /// Whether this entry matches the query's language filter
     pub matches_language: bool,
+    /// Distance from proximity point (0.0 if no proximity query)
+    pub distance: f64,
+    /// Combined score considering distance and importance (score if no proximity)
+    pub scoredist: f64
 }
 
 impl GridKey {

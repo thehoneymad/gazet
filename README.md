@@ -24,8 +24,59 @@ Completed features:
 - ✅ Query tests (exact phrase, range, prefix bins, language filtering, language penalty)
 - ✅ Single-phrase coalescing with deduplication and relevance filtering
 
+🚧 **Phase 2.5: Multi-Phrase Coalescing** - IN PROGRESS
+
+Port carmen-core's full coalescing system for multi-phrase queries:
+
+**Core Structures to Port:**
+- [ ] `PhrasematchSubquery` - Query structure for multi-phrase matching
+- [ ] `MatchKeyWithId` - Extended match key with phrasematch ID
+- [ ] `CoalesceEntry` - Extended entry with idx, mask, tmp_id, phrasematch_id
+- [ ] `CoalesceContext` - Context with multiple entries (stacked phrases)
+
+**Stackable Tree System:**
+- [ ] `StackableNode` - Tree node representing phrase combinations
+- [ ] `StackableTree` - Tree of valid phrase combinations
+- [ ] `ArenaManager` - Memory-efficient tree node management
+- [ ] `stackable()` - Build tree from phrasematches with type hierarchy
+- [ ] Relevance-based pruning (keep top 2000 leaves)
+
+**Spatial Overlap Detection:**
+- [ ] KDBush spatial index for fast proximity queries
+- [ ] `covers()` - Check if two entries spatially overlap
+- [ ] Distance threshold calculation based on zoom level
+- [ ] Bounding box intersection logic
+
+**Coalescing Functions:**
+- [ ] `coalesce_multi()` - Multi-phrase coalescing with stacking
+- [ ] `tree_coalesce()` - Walk stackable tree and combine phrases
+- [ ] `stack_and_coalesce()` - Combined stackable + coalesce operation
+- [ ] `collapse_phrasematches()` - Collapse multiple phrasematches into one
+
+**Type Hierarchy Support:**
+- [ ] `type_id` field in GridStore (street=0, city=1, country=2, etc.)
+- [ ] Type-based stacking rules (street can stack with city, not with country)
+- [ ] Zoom coordination across different index types
+
+**Tests to Port from carmen-core:**
+- [ ] `coalesce_test.rs` - All coalescing tests
+  - [ ] `coalesce_single_test_proximity_quadrants`
+  - [ ] `coalesce_single_test_proximity_basic`
+  - [ ] `coalesce_single_test_language_penalty`
+  - [ ] Multi-phrase stacking tests
+  - [ ] Spatial overlap tests
+  - [ ] Type hierarchy tests
+
+**Dependencies to Add:**
+- [ ] `generational-arena` - Arena allocator for tree nodes
+- [ ] `fxhash` - Fast hash for internal maps
+- [ ] `indexmap` - Ordered hash map
+- [ ] `rayon` - Parallel iteration (optional optimization)
+- [ ] `static-bushes` - KDBush spatial index
+
+**Estimated Effort:** 2-3 days focused work
+
 Future enhancements:
-- ❌ Multi-phrase stacking (combining "Main" + "Street" results)
 - ❌ Error logging for corrupted entries
 
 ## Documentation

@@ -3,46 +3,48 @@
 //! Use `GridStore` at query time to retrieve spatial phrase data.
 //! See `GridStoreBuilder` for creating indexes.
 
+use crate::storage::group_by_owned;
 use crate::storage::{
-    decode_boundaries, decode_relev_score, unpack_feature_id,
-    GridEntry, GridKey, MatchEntry, MatchKey, MatchOpts, MatchPhrase, PhraseId,
+    decode_boundaries, decode_relev_score, proximity_radius, scoredist, tile_dist,
+    unpack_feature_id, GridEntry, GridKey, MatchEntry, MatchKey, MatchOpts, MatchPhrase, PhraseId,
     Result, StorageError, TypeMarker, BOUNDS_KEY,
 };
+use interval_heap::IntervalHeap;
+use itertools::Itertools;
 use morton::deinterleave_morton;
+use ordered_float::OrderedFloat;
 use rocksdb::{Direction, IteratorMode, Options, DB};
+use smallvec::SmallVec;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use ordered_float::OrderedFloat;
-use std::cmp::Ordering;
-use smallvec::SmallVec;
-use interval_heap::IntervalHeap;
 
 struct QueueElement<T: Iterator<Item = MatchEntry>> {
     next_entry: MatchEntry,
     entry_iter: T,
 }
 
-impl<T: Iterator<Item=MatchEntry>> Eq for QueueElement<T> {}
+impl<T: Iterator<Item = MatchEntry>> Eq for QueueElement<T> {}
 
-impl<T: Iterator<Item=MatchEntry>> PartialEq<Self> for QueueElement<T> {
+impl<T: Iterator<Item = MatchEntry>> PartialEq<Self> for QueueElement<T> {
     fn eq(&self, other: &Self) -> bool {
         self.sort_key() == other.sort_key()
     }
 }
 
-impl<T: Iterator<Item=MatchEntry>> PartialOrd<Self> for QueueElement<T> {
+impl<T: Iterator<Item = MatchEntry>> PartialOrd<Self> for QueueElement<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T: Iterator<Item=MatchEntry>> Ord for QueueElement<T> {
+impl<T: Iterator<Item = MatchEntry>> Ord for QueueElement<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.sort_key().cmp(&other.sort_key())
     }
 }
 
-impl<T: Iterator<Item=MatchEntry>> QueueElement<T> {
+impl<T: Iterator<Item = MatchEntry>> QueueElement<T> {
     fn sort_key(&self) -> (OrderedFloat<f64>, OrderedFloat<f64>, bool, u16, u16, u32) {
         (
             OrderedFloat(self.next_entry.grid_entry.relev),
@@ -93,7 +95,12 @@ impl GridStore {
             None => HashSet::new(),
         };
 
-        Ok(GridStore { db, bin_boundaries, zoom, coalesce_radius })
+        Ok(GridStore {
+            db,
+            bin_boundaries,
+            zoom,
+            coalesce_radius,
+        })
     }
 
     pub fn get(&self, key: &GridKey) -> Result<Option<Vec<GridEntry>>> {
@@ -158,9 +165,9 @@ impl GridStore {
     pub fn get_matching(
         &self,
         match_key: &MatchKey,
-        _match_opts: &MatchOpts, // TODO: Implement spatial filtering
+        match_opts: &MatchOpts, // TODO: Implement spatial filtering
         max_values: usize,
-    ) -> Result<impl Iterator<Item=MatchEntry>> {
+    ) -> Result<impl Iterator<Item = MatchEntry>> {
         // Determine query strategy: exact vs range, prefix bins vs individual lookups
         let (fetch_start, fetch_end, fetch_type_marker) = match match_key.match_phrase {
             // Convert exact lookup to half-open range [id, id+1) for uniform iteration logic
@@ -211,21 +218,23 @@ impl GridStore {
         for result in db_iter {
             let (key, value) = result.ok().unwrap();
             let matches_language = range_key_for_filter.matches_language(&key).ok().unwrap();
-            let entries = decode_value(&value).ok().unwrap();
 
-            let mut entry_iter = entries.into_iter().map(move |grid_entry| {
-                let score = grid_entry.score;
-                MatchEntry {
-                    grid_entry,
-                    matches_language,
-                    distance: 0.0,
-                    scoredist: score as f64,
-                }
-            });
+            let mut entry_iter = decode_matching_value(
+                value,
+                &match_opts,
+                matches_language,
+                self.zoom,
+                self.coalesce_radius,
+            )
+            .ok()
+            .unwrap();
 
             if let Some(next_entry) = entry_iter.next() {
-                let queue_element = QueueElement { next_entry, entry_iter };
-                
+                let queue_element = QueueElement {
+                    next_entry,
+                    entry_iter,
+                };
+
                 if pri_queue.len() >= max_values {
                     if let Some(worst_entry) = pri_queue.min() {
                         if worst_entry >= &queue_element {
@@ -265,10 +274,11 @@ impl GridStore {
 ///
 /// The stored format is a Vec of (RelevScore, HashMap<MortonCode, SmallVec<PackedFeatureId>>)
 /// sorted by RelevScore in descending order (high relevance first).
+#[inline]
 fn decode_value(value: &[u8]) -> Result<Vec<GridEntry>> {
     let sorted_entries: Vec<(u8, HashMap<u32, SmallVec<[u32; 4]>>)> =
         bincode::deserialize(value).map_err(|e| StorageError::Serialization(e.to_string()))?;
-    
+
     let mut entries = Vec::new();
 
     for (relev_score, morton_map) in sorted_entries {
@@ -291,6 +301,115 @@ fn decode_value(value: &[u8]) -> Result<Vec<GridEntry>> {
     }
 
     Ok(entries)
+}
+
+/// Deserializes and filters GridEntries with spatial matching.
+///
+/// Unlike decode_value(), this applies spatial filtering during iteration
+/// and calculates distance/scoredist for proximity ranking.
+///
+/// Groups by relevance, then within each relevance group, merges coords from
+/// different scores sorted by scoredist (highest first).
+#[inline]
+fn decode_matching_value<T: AsRef<[u8]>>(
+    value: T,
+    match_opts: &MatchOpts,
+    matches_language: bool,
+    zoom: u16,
+    coalesce_radius: f64,
+) -> Result<impl Iterator<Item = MatchEntry>> {
+    // Deserialize: Vec<(relev_score_byte, HashMap<morton, feature_ids>)>
+    // Already sorted by relev_score descending from builder
+    let sorted_entries: Vec<(u8, HashMap<u32, SmallVec<[u32; 4]>>)> =
+        bincode::deserialize(value.as_ref()).map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+    let match_opts = match_opts.clone();
+
+    // STEP 1: Flatten to (relev, score, morton, packed_ids) tuples
+    // Example: [(1.0, 7, morton1, [id1, id2]), (1.0, 5, morton2, [id3]), (0.8, 7, morton3, [id4])]
+    let relevs = sorted_entries
+        .into_iter()
+        .flat_map(|(relev_score, morton_map)| {
+            let (relev, score) = decode_relev_score(relev_score);
+            morton_map
+                .into_iter()
+                .map(move |(morton, ids)| (relev, score, morton, ids))
+        });
+
+    // STEP 2: Group consecutive entries by relevance
+    // Example: Relevance 1.0 → [(1.0, 7, ...), (1.0, 5, ...)], Relevance 0.8 → [(0.8, 7, ...)]
+    let iter =
+        group_by_owned(relevs, |(relev, _, _, _)| *relev).flat_map(move |(relev, score_groups)| {
+            let match_opts = match_opts.clone();
+
+            // STEP 3: Within each relevance group, process each coord
+            // Convert each coord to an iterator so kmerge can merge them
+            let coords_per_score = score_groups.into_iter().map(move |(_, score, morton, ids)| {
+                let (x, y) = deinterleave_morton(morton);
+
+                // Apply bbox filtering - return empty iterator if outside bounds
+                let passes_filter = match match_opts.bbox {
+                    Some(bbox) => x >= bbox[0] && x <= bbox[2] && y >= bbox[1] && y <= bbox[3],
+                    None => true,
+                };
+
+                if !passes_filter {
+                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _>>;
+                }
+
+                // Calculate distance and scoredist (proximity-adjusted score)
+                // scoredist = higher for closer results
+                let (distance, within_radius, scoredist) = match match_opts.proximity {
+                    Some(prox_pt) => {
+                        let distance = tile_dist(prox_pt[0], prox_pt[1], x, y);
+                        let within_radius = distance <= proximity_radius(zoom, coalesce_radius);
+                        let scoredist = scoredist(zoom, distance, score, coalesce_radius);
+                        (distance, within_radius, scoredist)
+                    }
+                    None => (0.0, false, score as f64),
+                };
+
+                // Return single-item iterator: (distance, within_radius, score, scoredist, x, y, ids)
+                Box::new(std::iter::once((distance, within_radius, score, scoredist, x, y, ids)))
+                    as Box<dyn Iterator<Item = _>>
+            });
+
+            // STEP 4: kmerge - merge iterators sorted by scoredist (highest first)
+            // Example: Score 7 [scoredist=50, 45], Score 5 [scoredist=60, 40]
+            //       → kmerge → [60, 50, 45, 40]
+            // This ensures best proximity-adjusted results come first within each relevance group
+            let all_coords = coords_per_score.kmerge_by(
+                |a: &(f64, bool, u8, f64, u16, u16, SmallVec<[u32; 4]>),
+                 b: &(f64, bool, u8, f64, u16, u16, SmallVec<[u32; 4]>)| {
+                    // Compare scoredist (tuple index 3), return true if a > b (descending)
+                    a.3.partial_cmp(&b.3).unwrap() == Ordering::Greater
+                }
+            );
+
+            // STEP 5: Expand each coord to individual feature IDs
+            // One coord may have multiple features: (x, y, [id1, id2]) → [MatchEntry(id1), MatchEntry(id2)]
+            all_coords.flat_map(move |(distance, within_radius, score, scoredist, x, y, ids)| {
+                ids.into_iter().map(move |packed_id| {
+                    let (id, source_phrase_hash) = unpack_feature_id(packed_id);
+                    MatchEntry {
+                        grid_entry: GridEntry {
+                            // Apply 4% penalty if wrong language AND outside search radius
+                            relev: relev * if matches_language || within_radius { 1.0 } else { 0.96 },
+                            score,
+                            x,
+                            y,
+                            id,
+                            source_phrase_hash,
+                        },
+                        matches_language,
+                        distance,
+                        scoredist,
+                    }
+                })
+            })
+        });
+
+    Ok(iter)
 }
 
 #[cfg(test)]
@@ -496,8 +615,8 @@ mod tests {
         let store = GridStore::new(dir.path()).unwrap();
 
         let match_key = MatchKey {
-            match_phrase: MatchPhrase::Exact(1),  // Query for phrase_id 1
-            lang_set: 1,  // Match language 1
+            match_phrase: MatchPhrase::Exact(1), // Query for phrase_id 1
+            lang_set: 1,                         // Match language 1
         };
 
         let match_opts = MatchOpts {
@@ -507,7 +626,7 @@ mod tests {
         };
 
         let results: Vec<MatchEntry> = store
-            .get_matching(&match_key, &match_opts, 10)  // max_values = 10
+            .get_matching(&match_key, &match_opts, 10) // max_values = 10
             .unwrap()
             .collect();
 

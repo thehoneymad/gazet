@@ -402,6 +402,20 @@ pub struct GridEntry {
     pub source_phrase_hash: u8,
 }
 
+impl GridEntry {
+    /// Check if this entry is within the given bounding box.
+    ///
+    /// # Arguments
+    /// * `bbox` - [min_x, min_y, max_x, max_y]
+    ///
+    /// # Returns
+    /// true if the entry's (x, y) coordinates are within the bbox (inclusive)
+    pub fn within_bbox(&self, bbox: [u16; 4]) -> bool {
+        self.x >= bbox[0] && self.x <= bbox[2]
+            && self.y >= bbox[1] && self.y <= bbox[3]
+    }
+}
+
 /// Converts float relevance to 2-bit integer (0-3).
 ///
 /// Relevance values are quantized to 4 discrete levels during indexing

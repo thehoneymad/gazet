@@ -219,14 +219,10 @@ impl GridStore {
             let (key, value) = result.ok().unwrap();
             let matches_language = range_key_for_filter.matches_language(&key).ok().unwrap();
 
-            let mut entry_iter = decode_matching_value(
-                value,
-                &match_opts,
-                matches_language,
-                self.coalesce_radius,
-            )
-            .ok()
-            .unwrap();
+            let mut entry_iter =
+                decode_matching_value(value, &match_opts, matches_language, self.coalesce_radius)
+                    .ok()
+                    .unwrap();
 
             if let Some(next_entry) = entry_iter.next() {
                 let queue_element = QueueElement {
@@ -352,7 +348,8 @@ fn decode_matching_value<T: AsRef<[u8]>>(
     // Deserialize: Vec<(relev_score_byte, HashMap<morton, feature_ids>)>
     // Already sorted by relev_score descending from builder
     let sorted_entries: Vec<(u8, HashMap<u32, SmallVec<[u32; 4]>>)> =
-        bincode::deserialize(value.as_ref()).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        bincode::deserialize(value.as_ref())
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
 
     let match_opts = match_opts.clone();
 
@@ -376,51 +373,81 @@ fn decode_matching_value<T: AsRef<[u8]>>(
             // STEP 3: Within each relevance group, process each coord
             // Convert each coord to an iterator so kmerge can merge them
             // Match carmen-core's 4-case spatial filtering structure
-            let coords_per_score = score_groups.into_iter().filter_map(move |(_, score, morton, ids)| {
-                let (x, y) = deinterleave_morton(morton);
+            let coords_per_score =
+                score_groups
+                    .into_iter()
+                    .filter_map(move |(_, score, morton, ids)| {
+                        let (x, y) = deinterleave_morton(morton);
 
-                // 4-case spatial filtering:
-                // Case 1: No spatial filtering
-                // Case 2: Bbox only
-                // Case 3: Proximity only  
-                // Case 4: Both bbox and proximity
-                let (distance, within_radius, scoredist) = match (&match_opts.bbox, &match_opts.proximity) {
-                    // Case 1: No spatial filtering - accept all coords
-                    (None, None) => {
-                        (0.0, false, score as f64)
-                    }
-                    
-                    // Case 2: Bbox only - filter by bounding box
-                    (Some(bbox), None) => {
-                        if !(x >= bbox[0] && x <= bbox[2] && y >= bbox[1] && y <= bbox[3]) {
-                            return None; // Outside bbox
-                        }
-                        (0.0, false, score as f64)
-                    }
-                    
-                    // Case 3: Proximity only - calculate distance and scoredist
-                    (None, Some(prox_pt)) => {
-                        let distance = tile_dist(prox_pt[0], prox_pt[1], x, y);
-                        let within_radius = distance <= proximity_radius(match_opts.zoom, coalesce_radius);
-                        let scoredist = scoredist(match_opts.zoom, distance, score, coalesce_radius);
-                        (distance, within_radius, scoredist)
-                    }
-                    
-                    // Case 4: Both bbox and proximity - filter by bbox, then calculate distance
-                    (Some(bbox), Some(prox_pt)) => {
-                        if !(x >= bbox[0] && x <= bbox[2] && y >= bbox[1] && y <= bbox[3]) {
-                            return None; // Outside bbox
-                        }
-                        let distance = tile_dist(prox_pt[0], prox_pt[1], x, y);
-                        let within_radius = distance <= proximity_radius(match_opts.zoom, coalesce_radius);
-                        let scoredist = scoredist(match_opts.zoom, distance, score, coalesce_radius);
-                        (distance, within_radius, scoredist)
-                    }
-                };
+                        // 4-case spatial filtering:
+                        // Case 1: No spatial filtering
+                        // Case 2: Bbox only
+                        // Case 3: Proximity only
+                        // Case 4: Both bbox and proximity
+                        let (distance, within_radius, scoredist) =
+                            match (&match_opts.bbox, &match_opts.proximity) {
+                                // Case 1: No spatial filtering - accept all coords
+                                (None, None) => (0.0, false, score as f64),
 
-                // Return tuple: (distance, within_radius, score, scoredist, x, y, ids)
-                Some((distance, within_radius, score, scoredist, x, y, ids))
-            });
+                                // Case 2: Bbox only - filter by bounding box
+                                (Some(bbox), None) => {
+                                    if !(x >= bbox[0]
+                                        && x <= bbox[2]
+                                        && y >= bbox[1]
+                                        && y <= bbox[3])
+                                    {
+                                        return None; // Outside bbox
+                                    }
+                                    (0.0, false, score as f64)
+                                }
+
+                                // Case 3: Proximity only - calculate distance and scoredist
+                                (None, Some(prox_pt)) => {
+                                    let distance = tile_dist(prox_pt[0], prox_pt[1], x, y);
+                                    let within_radius = distance
+                                        <= proximity_radius(match_opts.zoom, coalesce_radius);
+                                    let scoredist = scoredist(
+                                        match_opts.zoom,
+                                        distance,
+                                        score,
+                                        coalesce_radius,
+                                    );
+                                    (distance, within_radius, scoredist)
+                                }
+
+                                // Case 4: Both bbox and proximity - filter by bbox, then calculate distance
+                                (Some(bbox), Some(prox_pt)) => {
+                                    if !(x >= bbox[0]
+                                        && x <= bbox[2]
+                                        && y >= bbox[1]
+                                        && y <= bbox[3])
+                                    {
+                                        return None; // Outside bbox
+                                    }
+                                    let distance = tile_dist(prox_pt[0], prox_pt[1], x, y);
+                                    let within_radius = distance
+                                        <= proximity_radius(match_opts.zoom, coalesce_radius);
+                                    let scoredist = scoredist(
+                                        match_opts.zoom,
+                                        distance,
+                                        score,
+                                        coalesce_radius,
+                                    );
+                                    (distance, within_radius, scoredist)
+                                }
+                            };
+
+                        // Wrap tuple in once() iterator for kmerge compatibility
+                        Some(std::iter::once((
+                            distance,
+                            within_radius,
+                            score,
+                            scoredist,
+                            x,
+                            y,
+                            ids,
+                        )))
+                    });
 
             // STEP 4: kmerge - merge iterators sorted by scoredist (highest first)
             // Example: Score 7 [scoredist=50, 45], Score 5 [scoredist=60, 40]
@@ -429,32 +456,57 @@ fn decode_matching_value<T: AsRef<[u8]>>(
             let all_coords = coords_per_score.kmerge_by(
                 |a: &(f64, bool, u8, f64, u16, u16, SmallVec<[u32; 4]>),
                  b: &(f64, bool, u8, f64, u16, u16, SmallVec<[u32; 4]>)| {
-                    // Compare scoredist (tuple index 3), return true if a > b (descending)
-                    a.3.partial_cmp(&b.3).unwrap() == Ordering::Greater
-                }
+                    // Primary: scoredist descending (higher is better)
+                    match a.3.partial_cmp(&b.3).unwrap() {
+                        Ordering::Greater => true,
+                        Ordering::Less => false,
+                        Ordering::Equal => {
+                            // Secondary: distance ascending (closer is better)
+                            match a.0.partial_cmp(&b.0).unwrap() {
+                                Ordering::Less => true,
+                                Ordering::Greater => false,
+                                Ordering::Equal => {
+                                    // Tertiary: y coordinate ascending, then x ascending
+                                    match a.5.cmp(&b.5) {
+                                        Ordering::Less => true,
+                                        Ordering::Greater => false,
+                                        Ordering::Equal => a.4.cmp(&b.4) == Ordering::Less,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
             );
 
             // STEP 5: Expand each coord to individual feature IDs
             // One coord may have multiple features: (x, y, [id1, id2]) → [MatchEntry(id1), MatchEntry(id2)]
-            all_coords.flat_map(move |(distance, within_radius, score, scoredist, x, y, ids)| {
-                ids.into_iter().map(move |packed_id| {
-                    let (id, source_phrase_hash) = unpack_feature_id(packed_id);
-                    MatchEntry {
-                        grid_entry: GridEntry {
-                            // Apply 4% penalty if wrong language AND outside search radius
-                            relev: relev * if matches_language || within_radius { 1.0 } else { 0.96 },
-                            score,
-                            x,
-                            y,
-                            id,
-                            source_phrase_hash,
-                        },
-                        matches_language,
-                        distance,
-                        scoredist,
-                    }
-                })
-            })
+            all_coords.flat_map(
+                move |(distance, within_radius, score, scoredist, x, y, ids)| {
+                    ids.into_iter().map(move |packed_id| {
+                        let (id, source_phrase_hash) = unpack_feature_id(packed_id);
+                        MatchEntry {
+                            grid_entry: GridEntry {
+                                // Apply 4% penalty if wrong language AND outside search radius
+                                relev: relev
+                                    * if matches_language || within_radius {
+                                        1.0
+                                    } else {
+                                        0.96
+                                    },
+                                score,
+                                x,
+                                y,
+                                id,
+                                source_phrase_hash,
+                            },
+                            matches_language,
+                            distance,
+                            scoredist,
+                        }
+                    })
+                },
+            )
         });
 
     Ok(iter)
@@ -519,6 +571,221 @@ mod tests {
         // Note: Order may differ due to HashMap iteration
         assert!(retrieved.iter().any(|e| e.id == 1 && e.x == 100));
         assert!(retrieved.iter().any(|e| e.id == 2 && e.x == 101));
+    }
+
+    #[test]
+    fn test_proximity_ordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0,
+        };
+
+        // Four entries at different coordinates, all same relev/score
+        let entries = vec![
+            GridEntry {
+                id: 1,
+                x: 2,
+                y: 2,
+                relev: 1.0,
+                score: 1,
+                source_phrase_hash: 0,
+            },
+            GridEntry {
+                id: 2,
+                x: 2,
+                y: 0,
+                relev: 1.0,
+                score: 1,
+                source_phrase_hash: 0,
+            },
+            GridEntry {
+                id: 3,
+                x: 0,
+                y: 0,
+                relev: 1.0,
+                score: 1,
+                source_phrase_hash: 0,
+            },
+            GridEntry {
+                id: 4,
+                x: 0,
+                y: 2,
+                relev: 1.0,
+                score: 1,
+                source_phrase_hash: 0,
+            },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new_with_options(dir.path(), 14, 0.0).unwrap();
+
+        // Query with proximity point at (2, 2) - should return id=1 first (closest)
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Exact(1),
+            lang_set: 0,
+        };
+        let match_opts = MatchOpts {
+            bbox: None,
+            proximity: Some([2, 2]),
+            zoom: 14,
+        };
+
+        let results: Vec<MatchEntry> = store
+            .get_matching(&match_key, &match_opts, 10)
+            .unwrap()
+            .collect();
+
+        assert_eq!(results.len(), 4);
+
+        let result_ids: Vec<u32> = results.iter().map(|r| r.grid_entry.id).collect();
+        // Matches carmen-core's coalesce_single_test_proximity_basic
+        assert_eq!(
+            result_ids,
+            [1, 2, 4, 3],
+            "Results ordered by distance, then coordinates"
+        );
+
+        // Verify distances match expected values
+        assert_eq!(results[0].distance, 0.0);
+        assert_eq!(results[1].distance, 2.0);
+        assert_eq!(results[2].distance, 2.0);
+        assert!((results[3].distance - 2.83).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_bbox_filtering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0,
+        };
+
+        // Entries inside and outside bbox
+        let entries = vec![
+            GridEntry {
+                id: 1,
+                x: 5,
+                y: 5,
+                relev: 1.0,
+                score: 1,
+                source_phrase_hash: 0,
+            }, // inside
+            GridEntry {
+                id: 2,
+                x: 15,
+                y: 15,
+                relev: 1.0,
+                score: 1,
+                source_phrase_hash: 0,
+            }, // outside
+            GridEntry {
+                id: 3,
+                x: 8,
+                y: 8,
+                relev: 1.0,
+                score: 1,
+                source_phrase_hash: 0,
+            }, // inside
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new(dir.path()).unwrap();
+
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Exact(1),
+            lang_set: 0,
+        };
+        let match_opts = MatchOpts {
+            bbox: Some([0, 0, 10, 10]), // Only includes id=1 and id=3
+            proximity: None,
+            zoom: 14,
+        };
+
+        let results: Vec<MatchEntry> = store
+            .get_matching(&match_key, &match_opts, 10)
+            .unwrap()
+            .collect();
+
+        assert_eq!(results.len(), 2);
+        let result_ids: Vec<u32> = results.iter().map(|r| r.grid_entry.id).collect();
+        assert!(result_ids.contains(&1));
+        assert!(result_ids.contains(&3));
+        assert!(
+            !result_ids.contains(&2),
+            "id=2 outside bbox should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_multiple_coords_per_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0,
+        };
+
+        // Multiple entries with same score but different coordinates
+        let entries = vec![
+            GridEntry {
+                id: 1,
+                x: 100,
+                y: 100,
+                relev: 0.8,
+                score: 7,
+                source_phrase_hash: 0,
+            },
+            GridEntry {
+                id: 2,
+                x: 200,
+                y: 200,
+                relev: 0.8,
+                score: 7,
+                source_phrase_hash: 0,
+            },
+            GridEntry {
+                id: 3,
+                x: 300,
+                y: 300,
+                relev: 0.8,
+                score: 7,
+                source_phrase_hash: 0,
+            },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new(dir.path()).unwrap();
+
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Exact(1),
+            lang_set: 0,
+        };
+        let match_opts = MatchOpts {
+            bbox: None,
+            proximity: None,
+            zoom: 14,
+        };
+
+        let results: Vec<MatchEntry> = store
+            .get_matching(&match_key, &match_opts, 10)
+            .unwrap()
+            .collect();
+
+        // All 3 coords should be returned
+        assert_eq!(results.len(), 3);
+        let result_ids: Vec<u32> = results.iter().map(|r| r.grid_entry.id).collect();
+        assert!(result_ids.contains(&1));
+        assert!(result_ids.contains(&2));
+        assert!(result_ids.contains(&3));
     }
 
     #[test]

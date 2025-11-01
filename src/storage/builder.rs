@@ -360,9 +360,9 @@ impl GridStoreBuilder {
         // Convert HashMap to Vec and sort by RelevScore descending
         let mut sorted_entries: Vec<_> = entries.inner.iter().collect();
         sorted_entries.sort_by(|(relev_score_a, _), (relev_score_b, _)| {
-            relev_score_b.cmp(relev_score_a)  // Descending: high relevance first
+            relev_score_b.cmp(relev_score_a) // Descending: high relevance first
         });
-        
+
         bincode::serialize(&sorted_entries).map_err(|e| StorageError::Serialization(e.to_string()))
     }
 }
@@ -561,8 +561,8 @@ mod tests {
             let (key, _) = item.unwrap();
             if key.len() > 0 {
                 match key[0] {
-                    0 => individual_count += 1,  // SinglePhrase
-                    1 => bin_count += 1,          // PrefixBin
+                    0 => individual_count += 1, // SinglePhrase
+                    1 => bin_count += 1,        // PrefixBin
                     _ => {}
                 }
             }
@@ -669,20 +669,17 @@ mod tests {
     #[test]
     fn test_copy_entries_aggregates_data() {
         use smallvec::SmallVec;
-        
+
         let mut source = BuilderEntry::new();
         let mut dest = BuilderEntry::new();
 
         // Add some data to source
-        source.inner.insert(
-            0xFF,
-            {
-                let mut map = HashMap::new();
-                let vec: SmallVec<[u32; 4]> = smallvec::smallvec![1, 2, 3];
-                map.insert(123, vec);
-                map
-            },
-        );
+        source.inner.insert(0xFF, {
+            let mut map = HashMap::new();
+            let vec: SmallVec<[u32; 4]> = smallvec::smallvec![1, 2, 3];
+            map.insert(123, vec);
+            map
+        });
 
         copy_entries(&source, &mut dest);
 

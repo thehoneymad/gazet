@@ -54,11 +54,11 @@
 //! See [`MatchKey::matches_key()`] and [`MatchKey::matches_language()`] for
 //! the key parsing logic used during iteration.
 
+use crate::storage::Result;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use crate::storage::Result;
 
 /// Unique identifier for a phrase (supports up to 4 billion phrases).
 pub type PhraseId = u32;
@@ -172,7 +172,7 @@ pub struct MatchEntry {
     /// Distance from proximity point (0.0 if no proximity query)
     pub distance: f64,
     /// Combined score considering distance and importance (score if no proximity)
-    pub scoredist: f64
+    pub scoredist: f64,
 }
 
 impl GridKey {
@@ -411,8 +411,7 @@ impl GridEntry {
     /// # Returns
     /// true if the entry's (x, y) coordinates are within the bbox (inclusive)
     pub fn within_bbox(&self, bbox: [u16; 4]) -> bool {
-        self.x >= bbox[0] && self.x <= bbox[2]
-            && self.y >= bbox[1] && self.y <= bbox[3]
+        self.x >= bbox[0] && self.x <= bbox[2] && self.y >= bbox[1] && self.y <= bbox[3]
     }
 }
 

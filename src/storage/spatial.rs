@@ -113,7 +113,11 @@ mod tests {
 
     #[test]
     fn tiles_per_mile_by_zoom_test() {
-        assert_eq!(tiles_per_mile_by_zoom(14), 0.8, "Tiles per mile for zoom 14 should be 0.8");
+        assert_eq!(
+            tiles_per_mile_by_zoom(14),
+            0.8,
+            "Tiles per mile for zoom 14 should be 0.8"
+        );
         assert_eq!(
             tiles_per_mile_by_zoom(16),
             1.8000000000000003,
@@ -138,12 +142,20 @@ mod tests {
             720.0000000000001,
             "proximity_radius should work for zoom 14"
         );
-        assert_eq!(proximity_radius(6, 0.), 0., "proximity_radius for a radius of 0 should be 0");
+        assert_eq!(
+            proximity_radius(6, 0.),
+            0.,
+            "proximity_radius for a radius of 0 should be 0"
+        );
         assert_eq!(
             proximity_radius(6, 40.),
             1.2485901539399482,
             "proximity_radius in tiles for zoom 6, radius 40 is as expected"
         );
-        assert_eq!(proximity_radius(17, 400.), 1080.0, "proximity_radius should work for zoom 17");
+        assert_eq!(
+            proximity_radius(17, 400.),
+            1080.0,
+            "proximity_radius should work for zoom 17"
+        );
     }
 }

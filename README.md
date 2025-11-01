@@ -12,7 +12,7 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 
 ## Current Status
 
-✅ **Phase 2: Query Support** - COMPLETE
+🚧 **Phase 2: Query Support** - IN PROGRESS
 
 Completed features:
 - ✅ Streaming iterator with IntervalHeap priority queue
@@ -24,59 +24,16 @@ Completed features:
 - ✅ Query tests (exact phrase, range, prefix bins, language filtering, language penalty)
 - ✅ Single-phrase coalescing with deduplication and relevance filtering
 
-🚧 **Phase 2.5: Multi-Phrase Coalescing** - IN PROGRESS
+In progress:
+- 🚧 Multi-phrase coalescing (complete carmen-core port)
+  - ✅ Dependencies added (generational-arena, fxhash, indexmap, fixedbitset)
+  - ✅ Core structures (PhrasematchSubquery, MatchKeyWithId, CoalesceEntry)
+  - ❌ Stackable tree system (stackable.rs - ~500 lines)
+  - ❌ Multi-phrase coalescing (coalesce_multi, tree_coalesce - ~800 lines)
+  - ❌ Spatial overlap detection (KDBush, covers())
+  - ❌ All carmen-core coalescing tests
 
-Port carmen-core's full coalescing system for multi-phrase queries:
-
-**Core Structures to Port:**
-- [ ] `PhrasematchSubquery` - Query structure for multi-phrase matching
-- [ ] `MatchKeyWithId` - Extended match key with phrasematch ID
-- [ ] `CoalesceEntry` - Extended entry with idx, mask, tmp_id, phrasematch_id
-- [ ] `CoalesceContext` - Context with multiple entries (stacked phrases)
-
-**Stackable Tree System:**
-- [ ] `StackableNode` - Tree node representing phrase combinations
-- [ ] `StackableTree` - Tree of valid phrase combinations
-- [ ] `ArenaManager` - Memory-efficient tree node management
-- [ ] `stackable()` - Build tree from phrasematches with type hierarchy
-- [ ] Relevance-based pruning (keep top 2000 leaves)
-
-**Spatial Overlap Detection:**
-- [ ] KDBush spatial index for fast proximity queries
-- [ ] `covers()` - Check if two entries spatially overlap
-- [ ] Distance threshold calculation based on zoom level
-- [ ] Bounding box intersection logic
-
-**Coalescing Functions:**
-- [ ] `coalesce_multi()` - Multi-phrase coalescing with stacking
-- [ ] `tree_coalesce()` - Walk stackable tree and combine phrases
-- [ ] `stack_and_coalesce()` - Combined stackable + coalesce operation
-- [ ] `collapse_phrasematches()` - Collapse multiple phrasematches into one
-
-**Type Hierarchy Support:**
-- [ ] `type_id` field in GridStore (street=0, city=1, country=2, etc.)
-- [ ] Type-based stacking rules (street can stack with city, not with country)
-- [ ] Zoom coordination across different index types
-
-**Tests to Port from carmen-core:**
-- [ ] `coalesce_test.rs` - All coalescing tests
-  - [ ] `coalesce_single_test_proximity_quadrants`
-  - [ ] `coalesce_single_test_proximity_basic`
-  - [ ] `coalesce_single_test_language_penalty`
-  - [ ] Multi-phrase stacking tests
-  - [ ] Spatial overlap tests
-  - [ ] Type hierarchy tests
-
-**Dependencies to Add:**
-- [ ] `generational-arena` - Arena allocator for tree nodes
-- [ ] `fxhash` - Fast hash for internal maps
-- [ ] `indexmap` - Ordered hash map
-- [ ] `rayon` - Parallel iteration (optional optimization)
-- [ ] `static-bushes` - KDBush spatial index
-
-**Estimated Effort:** 2-3 days focused work
-
-Future enhancements:
+Future:
 - ❌ Error logging for corrupted entries
 
 ## Documentation
@@ -159,9 +116,20 @@ cargo doc --document-private-items --no-deps --open
   - [x] Proximity-based ranking with scoredist calculation
   - [x] Zoom level coordination via MatchOpts
   - [x] Multi-level kmerge tiebreakers (scoredist → distance → y → x)
-- [ ] Add coalescing/stacking logic
-  - [ ] Spatial overlap detection
-  - [ ] Relevance score combination
+- [ ] Add coalescing/stacking logic (carmen-core complete port)
+  - [ ] Core structures: PhrasematchSubquery, MatchKeyWithId, CoalesceEntry
+  - [ ] Stackable tree system: StackableNode, StackableTree, ArenaManager
+  - [ ] stackable() - Build tree from phrasematches with type hierarchy
+  - [ ] Relevance-based pruning (keep top 2000 leaves)
+  - [ ] KDBush spatial index for fast proximity queries (static-bushes dependency)
+  - [ ] covers() - Check if two entries spatially overlap
+  - [ ] Distance threshold calculation based on zoom level
+  - [ ] coalesce_multi() - Multi-phrase coalescing with stacking
+  - [ ] tree_coalesce() - Walk stackable tree and combine phrases
+  - [ ] stack_and_coalesce() - Combined stackable + coalesce operation
+  - [ ] collapse_phrasematches() - Collapse multiple phrasematches
+  - [ ] Type hierarchy support (type_id field, stacking rules)
+  - [ ] Port all tests from carmen-core/tests/coalesce_test.rs
   - [ ] Component type compatibility checking
 - [x] Write spatial filtering tests
   - [x] Test proximity ordering (matches carmen-core)

@@ -724,6 +724,209 @@ mod tests {
     }
 
     #[test]
+    fn test_exact_phrase_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Insert entries for multiple phrases
+        let key1 = GridKey { phrase_id: 1, lang_set: 0 };
+        let key2 = GridKey { phrase_id: 2, lang_set: 0 };
+        
+        builder.insert(&key1, vec![
+            GridEntry { id: 1, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+        ]).unwrap();
+        
+        builder.insert(&key2, vec![
+            GridEntry { id: 2, x: 20, y: 20, relev: 1.0, score: 5, source_phrase_hash: 0 },
+        ]).unwrap();
+        
+        builder.finish().unwrap();
+        let store = GridStore::new(dir.path()).unwrap();
+
+        // Query for exact phrase_id=1
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Exact(1),
+            lang_set: 0,
+        };
+        let match_opts = MatchOpts { bbox: None, proximity: None, zoom: 14 };
+        
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+        
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].grid_entry.id, 1);
+    }
+
+    #[test]
+    fn test_range_query_without_prefix_bins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Insert entries for phrase_ids 1, 2, 3
+        for phrase_id in 1..=3 {
+            let key = GridKey { phrase_id, lang_set: 0 };
+            builder.insert(&key, vec![
+                GridEntry { id: phrase_id, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+            ]).unwrap();
+        }
+        
+        builder.finish().unwrap();
+        let store = GridStore::new(dir.path()).unwrap();
+
+        // Query for range [1, 3) - should return phrase_ids 1 and 2
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Range { start: 1, end: 3 },
+            lang_set: 0,
+        };
+        let match_opts = MatchOpts { bbox: None, proximity: None, zoom: 14 };
+        
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+        
+        assert_eq!(results.len(), 2);
+        let result_ids: Vec<u32> = results.iter().map(|r| r.grid_entry.id).collect();
+        assert!(result_ids.contains(&1));
+        assert!(result_ids.contains(&2));
+        assert!(!result_ids.contains(&3), "phrase_id=3 outside range [1,3)");
+    }
+
+    #[test]
+    fn test_range_query_with_prefix_bins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Set bin boundaries at 100 and 200
+        builder.load_bin_boundaries(vec![100, 200]).unwrap();
+
+        // Insert entries for phrase_ids in first bin [0, 100)
+        for phrase_id in [10, 20, 30] {
+            let key = GridKey { phrase_id, lang_set: 0 };
+            builder.insert(&key, vec![
+                GridEntry { id: phrase_id, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+            ]).unwrap();
+        }
+        
+        builder.finish().unwrap();
+        let store = GridStore::new(dir.path()).unwrap();
+
+        // Query using prefix bin range [0, 100)
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Range { start: 0, end: 100 },
+            lang_set: 0,
+        };
+        let match_opts = MatchOpts { bbox: None, proximity: None, zoom: 14 };
+        
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+        
+        // Should return all 3 entries from the prefix bin
+        assert_eq!(results.len(), 3);
+        let result_ids: Vec<u32> = results.iter().map(|r| r.grid_entry.id).collect();
+        assert!(result_ids.contains(&10));
+        assert!(result_ids.contains(&20));
+        assert!(result_ids.contains(&30));
+    }
+
+    #[test]
+    fn test_language_filtering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0b0001, // Language bit 0 set
+        };
+        
+        builder.insert(&key, vec![
+            GridEntry { id: 1, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+        ]).unwrap();
+        
+        builder.finish().unwrap();
+        let store = GridStore::new(dir.path()).unwrap();
+
+        // Query with matching language
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Exact(1),
+            lang_set: 0b0001, // Same language
+        };
+        let match_opts = MatchOpts { bbox: None, proximity: None, zoom: 14 };
+        
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+        
+        assert_eq!(results.len(), 1);
+        assert!(results[0].matches_language, "Language should match");
+    }
+
+    #[test]
+    fn test_language_penalty_outside_radius() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0b0001, // Language bit 0
+        };
+        
+        builder.insert(&key, vec![
+            GridEntry { id: 1, x: 100, y: 100, relev: 1.0, score: 5, source_phrase_hash: 0 },
+        ]).unwrap();
+        
+        builder.finish().unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 1.0).unwrap(); // Small radius
+
+        // Query with different language and proximity far from result
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Exact(1),
+            lang_set: 0b0010, // Different language bit
+        };
+        let match_opts = MatchOpts {
+            bbox: None,
+            proximity: Some([0, 0]), // Far from (100, 100)
+            zoom: 14,
+        };
+        
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+        
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].matches_language, "Language should not match");
+        // 4% penalty applied: 1.0 * 0.96 = 0.96
+        assert_eq!(results[0].grid_entry.relev, 0.96, "Should have 4% language penalty");
+    }
+
+    #[test]
+    fn test_language_no_penalty_within_radius() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey {
+            phrase_id: 1,
+            lang_set: 0b0001,
+        };
+        
+        builder.insert(&key, vec![
+            GridEntry { id: 1, x: 2, y: 2, relev: 1.0, score: 5, source_phrase_hash: 0 },
+        ]).unwrap();
+        
+        builder.finish().unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 100.0).unwrap(); // Large radius
+
+        // Query with different language but proximity close to result
+        let match_key = MatchKey {
+            match_phrase: MatchPhrase::Exact(1),
+            lang_set: 0b0010, // Different language
+        };
+        let match_opts = MatchOpts {
+            bbox: None,
+            proximity: Some([2, 2]), // Same location
+            zoom: 14,
+        };
+        
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+        
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].matches_language, "Language should not match");
+        // No penalty because within radius: 1.0 * 1.0 = 1.0
+        assert_eq!(results[0].grid_entry.relev, 1.0, "No penalty within radius");
+    }
+
+    #[test]
     fn test_multiple_coords_per_score() {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = GridStoreBuilder::new(dir.path()).unwrap();

@@ -1,10 +1,10 @@
-# Cascade: Component-Aware Geocoding with Hierarchical Address Validation
+# Gazet: Component-Aware Geocoding with Hierarchical Address Validation
 
 A geocoder and address validation engine that extends traditional geocoding architectures with component-aware processing and graduated hierarchy penalties.
 
 ## Overview
 
-Cascade builds upon the proven Carmen geocoder architecture while introducing three key innovations:
+Gazet builds upon the proven Carmen geocoder architecture while introducing three key innovations:
 
 1. **Component-Aware Text Processing** - Classifies address elements by type (house numbers, street names, administrative regions, address ranges) during phrase generation
 2. **S2 Spatial Indexing** - Replaces Morton encoding with hierarchical S2 cell structures better suited for administrative boundaries
@@ -18,10 +18,10 @@ All core query and coalescing functionality is implemented and tested.
 
 ## Functional Differences from Carmen-Core
 
-Cascade is a complete port of carmen-core's query and coalescing system with the following intentional differences:
+Gazet is a complete port of carmen-core's query and coalescing system with the following intentional differences:
 
 ### Performance
-- **Sequential Processing**: Cascade uses single-threaded execution for simplicity
+- **Sequential Processing**: Gazet uses single-threaded execution for simplicity
   - Carmen-core uses `rayon` for parallel processing with `Send + Sync` bounds
   - Same results, but carmen-core is faster on multi-core systems
   - **Future work**: Add parallel processing with rayon for production workloads
@@ -207,7 +207,7 @@ cargo doc --open
 
 ## References
 
-Cascade builds upon geocoding concepts pioneered by the Carmen project:
+Gazet builds upon geocoding concepts pioneered by the Carmen project:
 - [Carmen Geocoder](https://github.com/mapbox/carmen) - Original JavaScript implementation
 - [Carmen Core (Rust)](https://github.com/mapbox/carmen-core) - Rust port with performance optimizations
 - [S2 Geometry Library](http://s2geometry.io/) - Hierarchical spatial indexing

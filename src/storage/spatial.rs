@@ -165,3 +165,31 @@ pub fn global_bbox_for_zoom(zoom: u16) -> Vec<[u16; 4]> {
     let max = ((1u32 << zoom) - 1) as u16;
     vec![[0, 0, max, max]]
 }
+
+/// Adjusts a bounding box from one zoom level to another.
+///
+/// When zooming out (target < source), coordinates are divided by 2^(difference).
+/// When zooming in (target > source), coordinates are multiplied by 2^(difference).
+pub fn adjust_bbox_zoom(bbox: [u16; 4], source_zoom: u16, target_zoom: u16) -> [u16; 4] {
+    if source_zoom == target_zoom {
+        bbox
+    } else if target_zoom < source_zoom {
+        // Zoom out: divide coordinates
+        let zoom_diff = source_zoom - target_zoom;
+        [
+            bbox[0] >> zoom_diff,
+            bbox[1] >> zoom_diff,
+            bbox[2] >> zoom_diff,
+            bbox[3] >> zoom_diff,
+        ]
+    } else {
+        // Zoom in: multiply coordinates
+        let scale = 1 << (target_zoom - source_zoom);
+        [
+            bbox[0] * scale,
+            bbox[1] * scale,
+            bbox[2] * scale,
+            bbox[3] * scale,
+        ]
+    }
+}

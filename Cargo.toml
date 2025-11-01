@@ -19,5 +19,6 @@ generational-arena = "0.2"
 fxhash = "0.2"
 indexmap = "2.0"
 fixedbitset = "0.5"
+static-bushes = "0.1"
 
 [dev-dependencies]

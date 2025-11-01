@@ -65,6 +65,9 @@ use fixedbitset::FixedBitSet;
 /// Maximum number of indexes (phrase sources) that can be queried together
 pub const MAX_INDEXES: usize = 200;
 
+/// Maximum number of contexts to return from coalescing
+pub const MAX_CONTEXTS: usize = 40;
+
 /// Unique identifier for a phrase (supports up to 4 billion phrases).
 pub type PhraseId = u32;
 
@@ -370,6 +373,42 @@ pub struct MatchOpts {
     pub proximity: Option<[u16; 2]>,
     /// Zoom level for tile coordinate system (default: 16)
     pub zoom: u16,
+}
+
+impl MatchOpts {
+    /// Adjusts match options to a different zoom level.
+    ///
+    /// Scales proximity point and bbox coordinates appropriately when
+    /// querying indexes at different zoom levels.
+    pub fn adjust_to_zoom(&self, target_z: u16) -> MatchOpts {
+        if self.zoom == target_z {
+            self.clone()
+        } else {
+            let adjusted_proximity = match &self.proximity {
+                Some([x, y]) => {
+                    if target_z < self.zoom {
+                        // Zoom out: divide by 2 for every level
+                        let zoom_levels = self.zoom - target_z;
+                        Some([x >> zoom_levels, y >> zoom_levels])
+                    } else {
+                        // Zoom in: pick middle of possible tiles
+                        let scale_multiplier = 1 << (target_z - self.zoom);
+                        let mid_coord_adjuster = scale_multiplier / 2 - 1;
+                        let adjusted_x = x * scale_multiplier + mid_coord_adjuster;
+                        let adjusted_y = y * scale_multiplier + mid_coord_adjuster;
+                        Some([adjusted_x, adjusted_y])
+                    }
+                }
+                None => None,
+            };
+
+            let adjusted_bbox = self.bbox.map(|bbox| {
+                crate::storage::adjust_bbox_zoom(bbox, self.zoom, target_z)
+            });
+
+            MatchOpts { zoom: target_z, proximity: adjusted_proximity, bbox: adjusted_bbox }
+        }
+    }
 }
 
 /// Unique identifier for a feature (truncated to 24 bits in storage).

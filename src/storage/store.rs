@@ -72,17 +72,21 @@ pub struct GridStore {
     pub bin_boundaries: HashSet<PhraseId>,
     pub zoom: u16,
     pub coalesce_radius: f64,
+    /// Type ID for this index (0=street, 1=city, 2=country, etc.)
+    /// Used for type-based stacking rules in multi-phrase queries
+    pub type_id: u16,
 }
 
 impl GridStore {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::new_with_options(path, DEFAULT_ZOOM, DEFAULT_COALESCE_RADIUS)
+        Self::new_with_options(path, DEFAULT_ZOOM, DEFAULT_COALESCE_RADIUS, 0)
     }
 
     pub fn new_with_options<P: AsRef<Path>>(
         path: P,
         zoom: u16,
         coalesce_radius: f64,
+        type_id: u16,
     ) -> Result<Self> {
         let mut opts = Options::default();
         opts.set_allow_mmap_reads(true);
@@ -100,6 +104,7 @@ impl GridStore {
             bin_boundaries,
             zoom,
             coalesce_radius,
+            type_id,
         })
     }
 
@@ -621,7 +626,7 @@ mod tests {
         builder.insert(&key, entries).unwrap();
         builder.finish().unwrap();
 
-        let store = GridStore::new_with_options(dir.path(), 14, 0.0).unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 0.0, 0).unwrap();
 
         // Query with proximity point at (2, 2) - should return id=1 first (closest)
         let match_key = MatchKey {
@@ -869,7 +874,7 @@ mod tests {
         ]).unwrap();
         
         builder.finish().unwrap();
-        let store = GridStore::new_with_options(dir.path(), 14, 1.0).unwrap(); // Small radius
+        let store = GridStore::new_with_options(dir.path(), 14, 1.0, 0).unwrap(); // Small radius
 
         // Query with different language and proximity far from result
         let match_key = MatchKey {
@@ -905,7 +910,7 @@ mod tests {
         ]).unwrap();
         
         builder.finish().unwrap();
-        let store = GridStore::new_with_options(dir.path(), 14, 100.0).unwrap(); // Large radius
+        let store = GridStore::new_with_options(dir.path(), 14, 100.0, 0).unwrap(); // Large radius
 
         // Query with different language but proximity close to result
         let match_key = MatchKey {
@@ -1009,7 +1014,7 @@ mod tests {
         builder.insert(&key, entries).unwrap();
         builder.finish().unwrap();
 
-        let store = GridStore::new_with_options(dir.path(), 14, 0.0).unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 0.0, 0).unwrap();
         let match_key = MatchKey { match_phrase: MatchPhrase::Exact(1), lang_set: 0 };
         let match_opts = MatchOpts {
             bbox: None,

@@ -21,6 +21,7 @@ mod coalesce;
 mod common;
 mod error;
 mod spatial;
+mod stackable;
 mod store;
 
 pub use builder::GridStoreBuilder;
@@ -28,4 +29,5 @@ pub use coalesce::{coalesce_single, CoalesceContext};
 pub use common::*;
 pub use error::*;
 pub use spatial::*;
+pub use stackable::{stackable, StackableNode, StackableTree};
 pub use store::GridStore;

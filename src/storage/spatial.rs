@@ -159,3 +159,9 @@ mod tests {
         );
     }
 }
+
+/// Returns a global bounding box covering the entire world at the given zoom level.
+pub fn global_bbox_for_zoom(zoom: u16) -> Vec<[u16; 4]> {
+    let max = ((1u32 << zoom) - 1) as u16;
+    vec![[0, 0, max, max]]
+}

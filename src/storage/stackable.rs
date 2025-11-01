@@ -182,7 +182,7 @@ impl<'a, T: Borrow<GridStore> + Clone + Debug> ArenaManager<'a, T> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::storage::{GridStoreBuilder, GridKey, GridEntry, MatchKey, MatchPhrase, MatchKeyWithId};
+    use crate::storage::{GridStoreBuilder, GridKey, GridEntry, MatchKey, MatchPhrase, MatchKeyWithId, global_bbox_for_zoom};
     use tempfile;
 
     #[test]
@@ -199,8 +199,8 @@ mod test {
         builder.insert(&key, entries).unwrap();
         builder.finish().unwrap();
 
-        let store1 = GridStore::new_with_options(dir.path(), 14, 200., 1).unwrap();
-        let store2 = GridStore::new_with_options(dir.path(), 14, 200., 2).unwrap();
+        let store1 = GridStore::new_with_options(dir.path(), 14, 1, 200., global_bbox_for_zoom(14), 0.0).unwrap();
+        let store2 = GridStore::new_with_options(dir.path(), 14, 2, 200., global_bbox_for_zoom(14), 0.0).unwrap();
 
         let a1 = PhrasematchSubquery {
             store: &store1,
@@ -275,7 +275,7 @@ mod test {
         builder.insert(&key, entries).unwrap();
         builder.finish().unwrap();
 
-        let store = GridStore::new_with_options(dir.path(), 14, 200., 0).unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 0, 200., global_bbox_for_zoom(14), 0.0).unwrap();
 
         let a1 = PhrasematchSubquery {
             store: &store,
@@ -323,7 +323,7 @@ mod test {
         builder.insert(&key, entries).unwrap();
         builder.finish().unwrap();
 
-        let store = GridStore::new_with_options(dir.path(), 14, 200., 0).unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 0, 200., global_bbox_for_zoom(14), 0.0).unwrap();
 
         let a1 = PhrasematchSubquery {
             store: &store,
@@ -371,7 +371,7 @@ mod test {
         builder.insert(&key, entries).unwrap();
         builder.finish().unwrap();
 
-        let store = GridStore::new_with_options(dir.path(), 14, 200., 0).unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 0, 200., global_bbox_for_zoom(14), 0.0).unwrap();
 
         let a1 = PhrasematchSubquery {
             store: &store,

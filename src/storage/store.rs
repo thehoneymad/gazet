@@ -72,22 +72,30 @@ pub struct GridStore {
     /// Empty if no prefix bins were created during indexing.
     pub bin_boundaries: HashSet<PhraseId>,
     pub zoom: u16,
-    pub coalesce_radius: f64,
     /// Type ID for this index (0=street, 1=city, 2=country, etc.)
     /// Used for type-based stacking rules in multi-phrase queries
     pub type_id: u16,
+    pub coalesce_radius: f64,
+    /// Bounding boxes defining geographic coverage of this index
+    /// Format: [min_x, min_y, max_x, max_y] in tile coordinates
+    pub bboxes: Vec<[u16; 4]>,
+    /// Maximum score value in this index (used for priority ordering)
+    pub max_score: f64,
 }
 
 impl GridStore {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::new_with_options(path, DEFAULT_ZOOM, DEFAULT_COALESCE_RADIUS, 0)
+        let max = (1u32 << DEFAULT_ZOOM) - 1;
+        Self::new_with_options(path, DEFAULT_ZOOM, 0, DEFAULT_COALESCE_RADIUS, vec![[0, 0, max as u16, max as u16]], 0.0)
     }
 
     pub fn new_with_options<P: AsRef<Path>>(
         path: P,
         zoom: u16,
-        coalesce_radius: f64,
         type_id: u16,
+        coalesce_radius: f64,
+        bboxes: Vec<[u16; 4]>,
+        max_score: f64,
     ) -> Result<Self> {
         let mut opts = Options::default();
         opts.set_allow_mmap_reads(true);
@@ -104,8 +112,10 @@ impl GridStore {
             db,
             bin_boundaries,
             zoom,
-            coalesce_radius,
             type_id,
+            coalesce_radius,
+            bboxes,
+            max_score,
         })
     }
 
@@ -521,7 +531,7 @@ fn decode_matching_value<T: AsRef<[u8]>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{truncate_score, GridStoreBuilder};
+    use crate::storage::{global_bbox_for_zoom, truncate_score, GridStoreBuilder};
     use tempfile;
 
     #[test]
@@ -627,7 +637,7 @@ mod tests {
         builder.insert(&key, entries).unwrap();
         builder.finish().unwrap();
 
-        let store = GridStore::new_with_options(dir.path(), 14, 0.0, 0).unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 0, 0.0, global_bbox_for_zoom(14), 0.0).unwrap();
 
         // Query with proximity point at (2, 2) - should return id=1 first (closest)
         let match_key = MatchKey {
@@ -875,7 +885,7 @@ mod tests {
         ]).unwrap();
         
         builder.finish().unwrap();
-        let store = GridStore::new_with_options(dir.path(), 14, 1.0, 0).unwrap(); // Small radius
+        let store = GridStore::new_with_options(dir.path(), 14, 0, 1.0, global_bbox_for_zoom(14), 0.0).unwrap(); // Small radius
 
         // Query with different language and proximity far from result
         let match_key = MatchKey {
@@ -911,7 +921,7 @@ mod tests {
         ]).unwrap();
         
         builder.finish().unwrap();
-        let store = GridStore::new_with_options(dir.path(), 14, 100.0, 0).unwrap(); // Large radius
+        let store = GridStore::new_with_options(dir.path(), 14, 0, 100.0, global_bbox_for_zoom(14), 0.0).unwrap(); // Large radius
 
         // Query with different language but proximity close to result
         let match_key = MatchKey {
@@ -1015,7 +1025,7 @@ mod tests {
         builder.insert(&key, entries).unwrap();
         builder.finish().unwrap();
 
-        let store = GridStore::new_with_options(dir.path(), 14, 0.0, 0).unwrap();
+        let store = GridStore::new_with_options(dir.path(), 14, 0, 0.0, global_bbox_for_zoom(14), 0.0).unwrap();
         let match_key = MatchKey { match_phrase: MatchPhrase::Exact(1), lang_set: 0 };
         let match_opts = MatchOpts {
             bbox: None,

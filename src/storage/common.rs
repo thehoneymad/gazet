@@ -68,6 +68,76 @@ pub const MAX_INDEXES: usize = 200;
 /// Maximum number of contexts to return from coalescing
 pub const MAX_CONTEXTS: usize = 40;
 
+/// Maximum grids to fetch per phrase
+pub const MAX_GRIDS_PER_PHRASE: usize = 100_000;
+
+/// Priority queue with maximum size constraint.
+///
+/// Automatically evicts lowest-priority elements when full.
+/// Used in tree_coalesce to maintain top-N results efficiently.
+pub struct ConstrainedPriorityQueue<T: Ord> {
+    pub max_size: usize,
+    heap: interval_heap::IntervalHeap<T>,
+}
+
+impl<T: Ord> ConstrainedPriorityQueue<T> {
+    pub fn new(max_size: usize) -> Self {
+        ConstrainedPriorityQueue { max_size, heap: interval_heap::IntervalHeap::new() }
+    }
+
+    /// Pushes element, evicting minimum if at capacity.
+    /// Returns true if element was added.
+    pub fn push(&mut self, element: T) -> bool {
+        if self.heap.len() >= self.max_size {
+            if let Some(min) = self.heap.min() {
+                if &element > min {
+                    self.heap.pop_min();
+                    self.heap.push(element);
+                    return true;
+                }
+            }
+        } else {
+            self.heap.push(element);
+            return true;
+        }
+        false
+    }
+
+    pub fn pop_max(&mut self) -> Option<T> {
+        self.heap.pop_max()
+    }
+
+    pub fn peek_min(&self) -> Option<&T> {
+        self.heap.min()
+    }
+
+    pub fn peek_max(&self) -> Option<&T> {
+        self.heap.max()
+    }
+
+    pub fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// Converts to sorted Vec in descending order
+    pub fn into_vec_desc(mut self) -> Vec<T> {
+        let mut result = Vec::with_capacity(self.heap.len());
+        while let Some(item) = self.pop_max() {
+            result.push(item);
+        }
+        result
+    }
+}
+
+impl<T: Ord> IntoIterator for ConstrainedPriorityQueue<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec_desc().into_iter()
+    }
+}
+
 /// Unique identifier for a phrase (supports up to 4 billion phrases).
 pub type PhraseId = u32;
 
@@ -270,6 +340,12 @@ pub struct MatchKey {
     pub lang_set: LanguageSet,
 }
 
+impl Default for MatchKey {
+    fn default() -> Self {
+        MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 }
+    }
+}
+
 impl MatchKey {
     // Design Note: Query-Centric Key Matching
     //
@@ -375,6 +451,12 @@ pub struct MatchOpts {
     pub zoom: u16,
 }
 
+impl Default for MatchOpts {
+    fn default() -> Self {
+        MatchOpts { bbox: None, proximity: None, zoom: 16 }
+    }
+}
+
 impl MatchOpts {
     /// Adjusts match options to a different zoom level.
     ///
@@ -408,6 +490,23 @@ impl MatchOpts {
 
             MatchOpts { zoom: target_z, proximity: adjusted_proximity, bbox: adjusted_bbox }
         }
+    }
+
+    /// Augments bbox based on nearby_only flag and optional bounds.
+    pub fn augment_bbox(&self, nearby_only: bool, bounds: Option<[u16; 4]>) -> MatchOpts {
+        let new_bbox = if nearby_only {
+            if let Some(prox) = self.proximity {
+                Some([prox[0], prox[1], prox[0], prox[1]])
+            } else {
+                self.bbox
+            }
+        } else if let Some(b) = bounds {
+            Some(b)
+        } else {
+            self.bbox
+        };
+
+        MatchOpts { bbox: new_bbox, proximity: self.proximity, zoom: self.zoom }
     }
 }
 
@@ -1035,22 +1134,31 @@ mod tests {
 /// Extended match key with phrasematch ID for multi-phrase queries.
 ///
 /// Used in multi-phrase coalescing to track which phrasematch a result came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MatchKeyWithId {
-    /// Unique ID for this phrasematch within the query
-    pub id: u32,
     /// The underlying match key (phrase range + language)
     pub key: MatchKey,
+    /// Only search near proximity point (applies bbox buffer)
+    #[serde(default)]
+    pub nearby_only: bool,
+    /// Unique ID for this phrasematch within the query
+    pub id: u32,
+    /// Length of the phrase (for quota tracking)
+    #[serde(default)]
+    pub phrase_length: usize,
+    /// Optional bounding box constraint for this specific key
+    pub bounds: Option<[u16; 4]>,
 }
 
 impl Default for MatchKeyWithId {
     fn default() -> Self {
         MatchKeyWithId {
+            key: MatchKey::default(),
+            nearby_only: false,
             id: 0,
-            key: MatchKey {
-                match_phrase: MatchPhrase::Exact(0),
-                lang_set: 0,
-            },
+            // default is 2 because 1 has special behaviors
+            phrase_length: 2,
+            bounds: None,
         }
     }
 }

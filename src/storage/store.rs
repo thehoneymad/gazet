@@ -84,6 +84,12 @@ pub struct GridStore {
 }
 
 impl GridStore {
+    /// Returns true if this index might be slow to query (high zoom level).
+    /// High-zoom indexes (>= 14) have many more tiles and can be slow for range queries.
+    pub fn might_be_slow(&self) -> bool {
+        self.zoom >= 14
+    }
+
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let max = (1u32 << DEFAULT_ZOOM) - 1;
         Self::new_with_options(path, DEFAULT_ZOOM, 0, DEFAULT_COALESCE_RADIUS, vec![[0, 0, max as u16, max as u16]], 0.0)

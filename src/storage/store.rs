@@ -927,6 +927,149 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_features_same_coordinate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey { phrase_id: 1, lang_set: 0 };
+
+        // Multiple features at exact same coordinate (x=10, y=10)
+        let entries = vec![
+            GridEntry { id: 1, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+            GridEntry { id: 2, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+            GridEntry { id: 3, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new(dir.path()).unwrap();
+        let match_key = MatchKey { match_phrase: MatchPhrase::Exact(1), lang_set: 0 };
+        let match_opts = MatchOpts { bbox: None, proximity: None, zoom: 14 };
+
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+
+        // All 3 features should be returned
+        assert_eq!(results.len(), 3);
+        let result_ids: Vec<u32> = results.iter().map(|r| r.grid_entry.id).collect();
+        assert!(result_ids.contains(&1));
+        assert!(result_ids.contains(&2));
+        assert!(result_ids.contains(&3));
+        
+        // All should have same coordinates
+        for result in &results {
+            assert_eq!(result.grid_entry.x, 10);
+            assert_eq!(result.grid_entry.y, 10);
+        }
+    }
+
+    #[test]
+    fn test_multiple_features_same_coordinate_different_scores() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey { phrase_id: 1, lang_set: 0 };
+
+        // Multiple features at same coordinate but different scores
+        let entries = vec![
+            GridEntry { id: 1, x: 10, y: 10, relev: 1.0, score: 10, source_phrase_hash: 0 },
+            GridEntry { id: 2, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+            GridEntry { id: 3, x: 10, y: 10, relev: 1.0, score: 15, source_phrase_hash: 0 },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new(dir.path()).unwrap();
+        let match_key = MatchKey { match_phrase: MatchPhrase::Exact(1), lang_set: 0 };
+        let match_opts = MatchOpts { bbox: None, proximity: None, zoom: 14 };
+
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+
+        assert_eq!(results.len(), 3);
+        
+        // Should be ordered by score descending (15, 10, 5)
+        let result_scores: Vec<u8> = results.iter().map(|r| r.grid_entry.score).collect();
+        assert_eq!(result_scores[0], 15);
+        assert_eq!(result_scores[1], 10);
+        assert_eq!(result_scores[2], 5);
+    }
+
+    #[test]
+    fn test_multiple_features_same_coordinate_with_proximity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey { phrase_id: 1, lang_set: 0 };
+
+        // Multiple features at same coordinate
+        let entries = vec![
+            GridEntry { id: 1, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+            GridEntry { id: 2, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 1 },
+            GridEntry { id: 3, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 2 },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new_with_options(dir.path(), 14, 0.0).unwrap();
+        let match_key = MatchKey { match_phrase: MatchPhrase::Exact(1), lang_set: 0 };
+        let match_opts = MatchOpts {
+            bbox: None,
+            proximity: Some([10, 10]), // Same location
+            zoom: 14,
+        };
+
+        let results: Vec<MatchEntry> = store.get_matching(&match_key, &match_opts, 10).unwrap().collect();
+
+        assert_eq!(results.len(), 3);
+        
+        // All should have distance=0 (same location as proximity point)
+        for result in &results {
+            assert_eq!(result.distance, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_morton_collision_different_phrases() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        // Two different phrases, both have features at (10, 10)
+        let key1 = GridKey { phrase_id: 1, lang_set: 0 };
+        let key2 = GridKey { phrase_id: 2, lang_set: 0 };
+
+        builder.insert(&key1, vec![
+            GridEntry { id: 1, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+            GridEntry { id: 2, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+        ]).unwrap();
+
+        builder.insert(&key2, vec![
+            GridEntry { id: 3, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+            GridEntry { id: 4, x: 10, y: 10, relev: 1.0, score: 5, source_phrase_hash: 0 },
+        ]).unwrap();
+
+        builder.finish().unwrap();
+        let store = GridStore::new(dir.path()).unwrap();
+
+        // Query phrase 1 - should only get ids 1 and 2
+        let match_key1 = MatchKey { match_phrase: MatchPhrase::Exact(1), lang_set: 0 };
+        let match_opts = MatchOpts { bbox: None, proximity: None, zoom: 14 };
+        let results1: Vec<MatchEntry> = store.get_matching(&match_key1, &match_opts, 10).unwrap().collect();
+        
+        assert_eq!(results1.len(), 2);
+        let ids1: Vec<u32> = results1.iter().map(|r| r.grid_entry.id).collect();
+        assert!(ids1.contains(&1));
+        assert!(ids1.contains(&2));
+
+        // Query phrase 2 - should only get ids 3 and 4
+        let match_key2 = MatchKey { match_phrase: MatchPhrase::Exact(2), lang_set: 0 };
+        let results2: Vec<MatchEntry> = store.get_matching(&match_key2, &match_opts, 10).unwrap().collect();
+        
+        assert_eq!(results2.len(), 2);
+        let ids2: Vec<u32> = results2.iter().map(|r| r.grid_entry.id).collect();
+        assert!(ids2.contains(&3));
+        assert!(ids2.contains(&4));
+    }
+
+    #[test]
     fn test_multiple_coords_per_score() {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = GridStoreBuilder::new(dir.path()).unwrap();

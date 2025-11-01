@@ -223,7 +223,6 @@ impl GridStore {
                 value,
                 &match_opts,
                 matches_language,
-                self.zoom,
                 self.coalesce_radius,
             )
             .ok()
@@ -348,7 +347,6 @@ fn decode_matching_value<T: AsRef<[u8]>>(
     value: T,
     match_opts: &MatchOpts,
     matches_language: bool,
-    zoom: u16,
     coalesce_radius: f64,
 ) -> Result<impl Iterator<Item = MatchEntry>> {
     // Deserialize: Vec<(relev_score_byte, HashMap<morton, feature_ids>)>
@@ -377,34 +375,51 @@ fn decode_matching_value<T: AsRef<[u8]>>(
 
             // STEP 3: Within each relevance group, process each coord
             // Convert each coord to an iterator so kmerge can merge them
-            let coords_per_score = score_groups.into_iter().map(move |(_, score, morton, ids)| {
+            // Match carmen-core's 4-case spatial filtering structure
+            let coords_per_score = score_groups.into_iter().filter_map(move |(_, score, morton, ids)| {
                 let (x, y) = deinterleave_morton(morton);
 
-                // Apply bbox filtering - return empty iterator if outside bounds
-                let passes_filter = match match_opts.bbox {
-                    Some(bbox) => x >= bbox[0] && x <= bbox[2] && y >= bbox[1] && y <= bbox[3],
-                    None => true,
-                };
-
-                if !passes_filter {
-                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = _>>;
-                }
-
-                // Calculate distance and scoredist (proximity-adjusted score)
-                // scoredist = higher for closer results
-                let (distance, within_radius, scoredist) = match match_opts.proximity {
-                    Some(prox_pt) => {
+                // 4-case spatial filtering:
+                // Case 1: No spatial filtering
+                // Case 2: Bbox only
+                // Case 3: Proximity only  
+                // Case 4: Both bbox and proximity
+                let (distance, within_radius, scoredist) = match (&match_opts.bbox, &match_opts.proximity) {
+                    // Case 1: No spatial filtering - accept all coords
+                    (None, None) => {
+                        (0.0, false, score as f64)
+                    }
+                    
+                    // Case 2: Bbox only - filter by bounding box
+                    (Some(bbox), None) => {
+                        if !(x >= bbox[0] && x <= bbox[2] && y >= bbox[1] && y <= bbox[3]) {
+                            return None; // Outside bbox
+                        }
+                        (0.0, false, score as f64)
+                    }
+                    
+                    // Case 3: Proximity only - calculate distance and scoredist
+                    (None, Some(prox_pt)) => {
                         let distance = tile_dist(prox_pt[0], prox_pt[1], x, y);
-                        let within_radius = distance <= proximity_radius(zoom, coalesce_radius);
-                        let scoredist = scoredist(zoom, distance, score, coalesce_radius);
+                        let within_radius = distance <= proximity_radius(match_opts.zoom, coalesce_radius);
+                        let scoredist = scoredist(match_opts.zoom, distance, score, coalesce_radius);
                         (distance, within_radius, scoredist)
                     }
-                    None => (0.0, false, score as f64),
+                    
+                    // Case 4: Both bbox and proximity - filter by bbox, then calculate distance
+                    (Some(bbox), Some(prox_pt)) => {
+                        if !(x >= bbox[0] && x <= bbox[2] && y >= bbox[1] && y <= bbox[3]) {
+                            return None; // Outside bbox
+                        }
+                        let distance = tile_dist(prox_pt[0], prox_pt[1], x, y);
+                        let within_radius = distance <= proximity_radius(match_opts.zoom, coalesce_radius);
+                        let scoredist = scoredist(match_opts.zoom, distance, score, coalesce_radius);
+                        (distance, within_radius, scoredist)
+                    }
                 };
 
-                // Return single-item iterator: (distance, within_radius, score, scoredist, x, y, ids)
-                Box::new(std::iter::once((distance, within_radius, score, scoredist, x, y, ids)))
-                    as Box<dyn Iterator<Item = _>>
+                // Return tuple: (distance, within_radius, score, scoredist, x, y, ids)
+                Some((distance, within_radius, score, scoredist, x, y, ids))
             });
 
             // STEP 4: kmerge - merge iterators sorted by scoredist (highest first)

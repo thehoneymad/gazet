@@ -1,6 +1,0 @@
-[book]
-authors = ["Swagata Prateek"]
-language = "en"
-multilingual = false
-src = "src"
-title = "Cascade Design"

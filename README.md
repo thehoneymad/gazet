@@ -1,20 +1,26 @@
-# Gazet: Component-Aware Geocoding with Hierarchical Address Validation
+# Gazet: A Journey to Understand Geocoding
 
-A geocoder and address validation engine that extends traditional geocoding architectures with component-aware processing and graduated hierarchy penalties.
+A Rust implementation reviving Mapbox's carmen-core geocoder to understand how addresses become locations.
 
-## Overview
+## Why Gazet Exists
 
-Gazet builds upon the proven Carmen geocoder architecture while introducing three key innovations:
+As an engineer, I wanted to deeply understand how an address actually gets broken down into a location. Just using a search engine wasn't enough - I needed to understand the mechanics. So I found Mapbox's long-lost geocoder implementation, carmen-core, and decided to revive it while learning Rust.
 
-1. **Component-Aware Text Processing** - Classifies address elements by type (house numbers, street names, administrative regions, address ranges) during phrase generation
-2. **S2 Spatial Indexing** - Replaces Morton encoding with hierarchical S2 cell structures better suited for administrative boundaries
-3. **Ranged Address Feature Support** - Enables single features to represent entire address ranges with interpolation capabilities
+Gazet is that revival - a learning project to understand geocoding from first principles.
 
 ## Current Status
 
 ✅ **Phase 2: Query Support** - COMPLETE
 
-All core query and coalescing functionality is implemented and tested.
+Core query and coalescing functionality from carmen-core is implemented and tested.
+
+## Future Vision
+
+These are aspirational goals for Gazet, not current features:
+
+1. **Component-Aware Text Processing** - Classify address elements by type (house numbers, street names, administrative regions, address ranges) during phrase generation
+2. **S2 Spatial Indexing** - Replace Morton encoding with hierarchical S2 cell structures better suited for administrative boundaries
+3. **Ranged Address Feature Support** - Enable single features to represent entire address ranges with interpolation capabilities
 
 ## Functional Differences from Carmen-Core
 
@@ -47,15 +53,6 @@ All core algorithms are identical to carmen-core:
 - ✅ Spatial overlap detection using KDBush
 - ✅ Quota-based query limiting for high-zoom indexes
 - ✅ Relevance penalties for single-entry and ascending stacks
-
-## Test Coverage
-
-**53 passing tests** covering:
-- Storage layer (27 tests): insertion, retrieval, prefix bins, boundaries
-- Spatial filtering (10 tests): proximity, bbox, language penalties
-- Stackable trees (4 tests): type hierarchy, mask compatibility, bmask filtering
-- Coalescing (3 tests): single-phrase, multi-phrase, proximity ranking
-- Builder (9 tests): encoding, serialization, roundtrip verification
 
 ## Documentation
 

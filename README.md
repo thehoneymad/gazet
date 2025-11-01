@@ -14,6 +14,8 @@ Gazet is that revival - a learning project to understand geocoding from first pr
 
 Core query and coalescing functionality from carmen-core is implemented and tested.
 
+**Important Note:** Gazet currently implements only the storage layer compatible with the Carmen geocoder. The actual Carmen geocoder itself has not been ported to Rust yet. This would require porting [@mapbox/node-fuzzy-phrase](https://www.npmjs.com/package/@mapbox/node-fuzzy-phrase), which I don't have access to or am unsure if I should use as-is. Once that's figured out, I can add the missing pieces to create a complete geocoder.
+
 ## Future Vision
 
 These are aspirational goals for Gazet, not current features:

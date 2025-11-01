@@ -82,7 +82,10 @@ pub struct ConstrainedPriorityQueue<T: Ord> {
 
 impl<T: Ord> ConstrainedPriorityQueue<T> {
     pub fn new(max_size: usize) -> Self {
-        ConstrainedPriorityQueue { max_size, heap: interval_heap::IntervalHeap::new() }
+        ConstrainedPriorityQueue {
+            max_size,
+            heap: interval_heap::IntervalHeap::new(),
+        }
     }
 
     /// Pushes element, evicting minimum if at capacity.
@@ -342,7 +345,10 @@ pub struct MatchKey {
 
 impl Default for MatchKey {
     fn default() -> Self {
-        MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 }
+        MatchKey {
+            match_phrase: MatchPhrase::Range { start: 0, end: 1 },
+            lang_set: 0,
+        }
     }
 }
 
@@ -453,7 +459,11 @@ pub struct MatchOpts {
 
 impl Default for MatchOpts {
     fn default() -> Self {
-        MatchOpts { bbox: None, proximity: None, zoom: 16 }
+        MatchOpts {
+            bbox: None,
+            proximity: None,
+            zoom: 16,
+        }
     }
 }
 
@@ -484,11 +494,15 @@ impl MatchOpts {
                 None => None,
             };
 
-            let adjusted_bbox = self.bbox.map(|bbox| {
-                crate::storage::adjust_bbox_zoom(bbox, self.zoom, target_z)
-            });
+            let adjusted_bbox = self
+                .bbox
+                .map(|bbox| crate::storage::adjust_bbox_zoom(bbox, self.zoom, target_z));
 
-            MatchOpts { zoom: target_z, proximity: adjusted_proximity, bbox: adjusted_bbox }
+            MatchOpts {
+                zoom: target_z,
+                proximity: adjusted_proximity,
+                bbox: adjusted_bbox,
+            }
         }
     }
 
@@ -506,7 +520,11 @@ impl MatchOpts {
             self.bbox
         };
 
-        MatchOpts { bbox: new_bbox, proximity: self.proximity, zoom: self.zoom }
+        MatchOpts {
+            bbox: new_bbox,
+            proximity: self.proximity,
+            zoom: self.zoom,
+        }
     }
 }
 
@@ -1238,4 +1256,3 @@ impl From<&MatchEntry> for CoalesceEntry {
         }
     }
 }
-

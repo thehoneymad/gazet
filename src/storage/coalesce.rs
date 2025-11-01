@@ -3,13 +3,17 @@
 //! Combines results from multiple phrase queries (e.g., "Main" + "Street" + "Seattle")
 //! based on spatial overlap and type hierarchy rules.
 
-use crate::storage::{adjust_bbox_zoom, CoalesceEntry, ConstrainedPriorityQueue, GridStore, MatchEntry, MatchKey, MatchOpts, MatchPhrase, PhrasematchSubquery, Result, StackableNode, StackableTree, MAX_CONTEXTS};
+use crate::storage::{
+    adjust_bbox_zoom, CoalesceEntry, ConstrainedPriorityQueue, GridStore, MatchEntry, MatchKey,
+    MatchOpts, MatchPhrase, PhrasematchSubquery, Result, StackableNode, StackableTree,
+    MAX_CONTEXTS,
+};
+use itertools::Itertools;
+use ordered_float::OrderedFloat;
 use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use ordered_float::OrderedFloat;
-use itertools::Itertools;
 
 /// Coalesced context with multiple phrase entries
 #[derive(Debug, Clone, PartialEq)]
@@ -21,7 +25,16 @@ pub struct CoalesceContext {
 
 impl CoalesceContext {
     #[inline(always)]
-    fn sort_key(&self) -> (OrderedFloat<f64>, OrderedFloat<f64>, Reverse<u16>, u16, u16, u32) {
+    fn sort_key(
+        &self,
+    ) -> (
+        OrderedFloat<f64>,
+        OrderedFloat<f64>,
+        Reverse<u16>,
+        u16,
+        u16,
+        u32,
+    ) {
         (
             OrderedFloat(self.relev),
             OrderedFloat(self.entries[0].scoredist),
@@ -95,7 +108,10 @@ fn grid_to_coalesce_entry<T: Borrow<GridStore> + Clone>(
     let relevance = grid.grid_entry.relev * subquery.weight;
 
     CoalesceEntry {
-        grid_entry: crate::storage::GridEntry { relev: relevance, ..grid.grid_entry },
+        grid_entry: crate::storage::GridEntry {
+            relev: relevance,
+            ..grid.grid_entry
+        },
         matches_language: grid.matches_language,
         idx: subquery.idx,
         tmp_id: ((subquery.idx as u32) << 24) + grid.grid_entry.id,
@@ -197,7 +213,9 @@ pub fn coalesce_single<T: Borrow<GridStore> + Clone>(
         coalesced
             .entry(current_id)
             .and_modify(|existing| {
-                if current_scoredist > existing.scoredist && current_relev >= existing.grid_entry.relev {
+                if current_scoredist > existing.scoredist
+                    && current_relev >= existing.grid_entry.relev
+                {
                     *existing = coalesce_entry.clone();
                 }
             })
@@ -342,8 +360,9 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
     let mut zoom_adjusted_match_options = match_opts.clone();
 
     for (i, subquery) in stack.iter().enumerate() {
-        let mut to_add_to_coalesced: HashMap<(u16, u16, u16), Vec<CoalesceContext>> = HashMap::new();
-        
+        let mut to_add_to_coalesced: HashMap<(u16, u16, u16), Vec<CoalesceContext>> =
+            HashMap::new();
+
         // Find compatible zooms: all zooms higher than current
         // (we can scale down from high zoom to low zoom)
         let compatible_zooms: Vec<u16> = stack
@@ -372,8 +391,13 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
         )?;
 
         for grid in grids.take(MAX_GRIDS_PER_PHRASE) {
-            let coalesce_entry = grid_to_coalesce_entry(&grid, subquery, &zoom_adjusted_match_options, 0);
-            let zxy = (subquery.store.borrow().zoom, grid.grid_entry.x, grid.grid_entry.y);
+            let coalesce_entry =
+                grid_to_coalesce_entry(&grid, subquery, &zoom_adjusted_match_options, 0);
+            let zxy = (
+                subquery.store.borrow().zoom,
+                grid.grid_entry.x,
+                grid.grid_entry.y,
+            );
 
             let mut context_mask = coalesce_entry.mask;
             let mut context_relevance = coalesce_entry.grid_entry.relev;
@@ -394,7 +418,7 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
                 if let Some(already_coalesced) = coalesced.get(&other_zxy) {
                     let mut prev_mask = 0;
                     let mut prev_relev: f64 = 0.;
-                    
+
                     // Try to stack with each parent context
                     for parent_context in already_coalesced {
                         for parent_entry in &parent_context.entries {
@@ -408,7 +432,7 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
                                 context_relevance += parent_entry.grid_entry.relev;
                                 prev_mask = parent_entry.mask;
                                 prev_relev = parent_entry.grid_entry.relev;
-                            } 
+                            }
                             // Stack if masks don't overlap (different phrases)
                             else if (context_mask & parent_entry.mask) == 0 {
                                 entries.push(parent_entry.clone());
@@ -421,7 +445,7 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
                     }
                 }
             }
-            
+
             if context_relevance > max_relevance {
                 max_relevance = context_relevance;
             }
@@ -431,7 +455,7 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
                 // Penalize single-entry contexts (no stacking occurred)
                 if entries.len() == 1 {
                     context_relevance -= 0.01;
-                } 
+                }
                 // Penalize ascending mask order (less natural phrase order)
                 // Example: mask 0b001 before 0b010 is ascending (1 < 2)
                 else if entries[0].mask > entries[1].mask {
@@ -446,7 +470,7 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
                         relev: context_relevance,
                     });
                 }
-            } 
+            }
             // Non-final iterations: store for future stacking
             // Only store if first iteration OR successfully stacked (len > 1)
             else if i == 0 || entries.len() > 1 {
@@ -468,7 +492,7 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
                 }
             }
         }
-        
+
         // Merge this iteration's results into the main coalesced map
         for (to_add_zxy, to_add_context) in to_add_to_coalesced {
             if let Some(existing_vector) = coalesced.get_mut(&to_add_zxy) {
@@ -523,7 +547,10 @@ impl TreeCoalesceState {
     fn new(contexts: Vec<CoalesceContext>) -> TreeCoalesceState {
         let mut builder: static_bushes::KDBushBuilder<u16> = static_bushes::KDBushBuilder::new();
         for context in contexts.iter() {
-            let point = [context.entries[0].grid_entry.x, context.entries[0].grid_entry.y];
+            let point = [
+                context.entries[0].grid_entry.x,
+                context.entries[0].grid_entry.y,
+            ];
             builder.add(&point);
         }
         let bush = builder.finish();
@@ -563,7 +590,14 @@ impl<T: Borrow<GridStore> + Clone + Debug> CoalesceStep<'_, T> {
             false
         };
 
-        CoalesceStep { node, prev_state, prev_zoom, match_opts, possible_relev, contains_prox }
+        CoalesceStep {
+            node,
+            prev_state,
+            prev_zoom,
+            match_opts,
+            possible_relev,
+            contains_prox,
+        }
     }
 
     #[inline(always)]
@@ -620,15 +654,80 @@ pub const ONE_WORD_RANGE_QUOTA: usize = 40;
 pub const ALL_HIGH_ZOOM_RANGE_QUOTA: usize = 40;
 pub const ALL_HIGH_ZOOM_QUOTA: usize = 600;
 
+/// Tree-based coalescing using stackable tree for multi-phrase queries.
+///
+/// # Algorithm Overview
+///
+/// Tree coalescing walks the stackable tree to find valid phrase combinations,
+/// fetches matching grid entries for each phrase, and spatially stacks them
+/// based on coordinate overlap at different zoom levels.
+///
+/// # Two-Phase Processing
+///
+/// **Phase 1: Data Fetching**
+/// - For each tree node, fetch grid entries from GridStore
+/// - Single-phrase nodes: Complete coalescing immediately (optimization)
+/// - Multi-phrase nodes: Cache data for phase 2
+///
+/// **Phase 2: Spatial Stacking**
+/// - For each cached node, check spatial overlap with parent contexts
+/// - Stack entries that overlap at scaled coordinates
+/// - Build child contexts and enqueue for next iteration
+///
+/// # Example Workflow
+///
+/// Given stackable tree:
+/// ```text
+/// Root
+///  ├─ "Main" (zoom=14, type_id=1)
+///  │   └─ "Seattle" (zoom=6, type_id=2)
+///  └─ "Street" (zoom=14, type_id=1)
+///      └─ "Seattle" (zoom=6, type_id=2)
+/// ```
+///
+/// **Iteration 1**: Process "Main" and "Street"
+/// - Fetch grids: Main → [(x=1000, y=2000, id=1), (x=1500, y=2500, id=2)]
+/// - Fetch grids: Street → [(x=1000, y=2000, id=3), (x=2000, y=3000, id=4)]
+/// - Cache for phase 2
+/// - Create contexts: [Main@(1000,2000), Main@(1500,2500), Street@(1000,2000), ...]
+///
+/// **Iteration 2**: Process "Seattle" nodes
+/// - Fetch grids: Seattle → [(x=3, y=7, id=10), (x=5, y=9, id=11)]
+/// - Scale Main coords to zoom 6: (1000,2000) → (3,7), (1500,2500) → (5,9)
+/// - Check overlap:
+///   - Seattle@(3,7) overlaps Main@(1000,2000) → Stack: [Main, Seattle]
+///   - Seattle@(5,9) overlaps Main@(1500,2500) → Stack: [Main, Seattle]
+/// - Final contexts: [Main+Seattle@(3,7), Main+Seattle@(5,9), ...]
+///
+/// # Quota System
+///
+/// To prevent slow queries from dominating execution time:
+/// - ONE_LETTER_RANGE_QUOTA: 8 single-letter range queries
+/// - ONE_WORD_HIGH_ZOOM_RANGE_QUOTA: 8 single-word high-zoom ranges
+/// - ONE_WORD_RANGE_QUOTA: 40 single-word ranges total
+/// - ALL_HIGH_ZOOM_RANGE_QUOTA: 40 high-zoom ranges total
+/// - ALL_HIGH_ZOOM_QUOTA: 600 high-zoom queries total
+///
+/// # Spatial Overlap Detection
+///
+/// Uses KDBush spatial index for O(log n) proximity queries:
+/// 1. Build KDBush from parent context coordinates
+/// 2. For each child grid entry, scale coordinates to parent zoom
+/// 3. Query KDBush for exact coordinate match
+/// 4. Stack matching entries into new context
 pub fn tree_coalesce<T: Borrow<GridStore> + Clone + Debug>(
     stack_tree: &StackableTree<T>,
     match_opts: &MatchOpts,
 ) -> Result<Vec<CoalesceContext>> {
-    debug_assert!(stack_tree.root.phrasematch.is_none(), "no phrasematch on root node");
+    debug_assert!(
+        stack_tree.root.phrasematch.is_none(),
+        "no phrasematch on root node"
+    );
 
     let mut contexts: ConstrainedPriorityQueue<CoalesceContext> =
         ConstrainedPriorityQueue::new(MAX_CONTEXTS * 20);
-    let mut steps: interval_heap::IntervalHeap<CoalesceStep<T>> = interval_heap::IntervalHeap::new();
+    let mut steps: interval_heap::IntervalHeap<CoalesceStep<T>> =
+        interval_heap::IntervalHeap::new();
     let mut data_cache: HashMap<u32, Vec<MatchEntry>> = HashMap::new();
 
     let mut one_letter_range_count: usize = 0;
@@ -679,7 +778,8 @@ pub fn tree_coalesce<T: Borrow<GridStore> + Clone + Debug>(
                 for key_group in subquery.match_keys.iter() {
                     if is_single || !data_cache.contains_key(&key_group.id) {
                         let match_opts = if key_group.nearby_only || key_group.bounds.is_some() {
-                            step.match_opts.augment_bbox(key_group.nearby_only, key_group.bounds)
+                            step.match_opts
+                                .augment_bbox(key_group.nearby_only, key_group.bounds)
                         } else {
                             step.match_opts.clone()
                         };
@@ -799,11 +899,7 @@ pub fn tree_coalesce<T: Borrow<GridStore> + Clone + Debug>(
                     .subquery
                     .store
                     .borrow()
-                    .get_matching(
-                        &key_step.key,
-                        &key_step.match_opts,
-                        MAX_GRIDS_PER_PHRASE,
-                    )?
+                    .get_matching(&key_step.key, &key_step.match_opts, MAX_GRIDS_PER_PHRASE)?
                     .take(MAX_GRIDS_PER_PHRASE)
                     .filter(|grid| {
                         unique_ids.insert((
@@ -858,12 +954,8 @@ pub fn tree_coalesce<T: Borrow<GridStore> + Clone + Debug>(
                             grid.grid_entry.y / scale_factor,
                         );
 
-                        let entry = grid_to_coalesce_entry(
-                            grid,
-                            subquery,
-                            &step.match_opts,
-                            key_group.id,
-                        );
+                        let entry =
+                            grid_to_coalesce_entry(grid, subquery, &step.match_opts, key_group.id);
 
                         let already_coalesced =
                             prev_state.bush.exact_as_vec(prev_zoom_xy.0, prev_zoom_xy.1);
@@ -889,12 +981,8 @@ pub fn tree_coalesce<T: Borrow<GridStore> + Clone + Debug>(
                     }
                 } else {
                     for grid in grids.iter() {
-                        let entry = grid_to_coalesce_entry(
-                            grid,
-                            subquery,
-                            &step.match_opts,
-                            key_group.id,
-                        );
+                        let entry =
+                            grid_to_coalesce_entry(grid, subquery, &step.match_opts, key_group.id);
                         let context = CoalesceContext {
                             mask: subquery.mask,
                             relev: entry.grid_entry.relev,
@@ -930,9 +1018,7 @@ pub fn tree_coalesce<T: Borrow<GridStore> + Clone + Debug>(
                             zoomed_bboxes = child_store
                                 .bboxes
                                 .iter()
-                                .map(|bbox| {
-                                    adjust_bbox_zoom(*bbox, child_zoom, current_zoom)
-                                })
+                                .map(|bbox| adjust_bbox_zoom(*bbox, child_zoom, current_zoom))
                                 .collect();
                             &zoomed_bboxes
                         };
@@ -954,8 +1040,7 @@ pub fn tree_coalesce<T: Borrow<GridStore> + Clone + Debug>(
                             Some(state.clone()),
                             current_zoom,
                             match_opts,
-                            relev_so_far
-                                + child.phrasematch.expect("phrasematch required").weight,
+                            relev_so_far + child.phrasematch.expect("phrasematch required").weight,
                         ));
                     }
                 }
@@ -1020,20 +1105,22 @@ fn tree_coalesce_single<T: Borrow<GridStore> + Clone>(
         coalesced.insert(coalesce_entry.grid_entry.id, coalesce_entry);
     }
 
-    Ok(coalesced.into_iter().map(|(_, entry)| CoalesceContext {
-        mask: subquery.mask,
-        relev: entry.grid_entry.relev,
-        entries: vec![entry],
-    }).collect())
+    Ok(coalesced
+        .into_iter()
+        .map(|(_, entry)| CoalesceContext {
+            mask: subquery.mask,
+            relev: entry.grid_entry.relev,
+            entries: vec![entry],
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::{
-        GridStoreBuilder, GridKey, GridEntry, global_bbox_for_zoom,
-        MatchKey, MatchPhrase, MatchKeyWithId, PhrasematchSubquery,
-        MatchOpts, MAX_INDEXES,
+        global_bbox_for_zoom, GridEntry, GridKey, GridStoreBuilder, MatchKey, MatchKeyWithId,
+        MatchOpts, MatchPhrase, PhrasematchSubquery, MAX_INDEXES,
     };
     use fixedbitset::FixedBitSet;
 
@@ -1044,12 +1131,12 @@ mod tests {
     ) -> GridStore {
         let directory = tempfile::tempdir().unwrap();
         let mut builder = GridStoreBuilder::new(directory.path()).unwrap();
-        
+
         for (key, grid_entries) in entries {
             builder.insert(&key, grid_entries).unwrap();
         }
         builder.finish().unwrap();
-        
+
         GridStore::new_with_options(
             directory.path(),
             zoom,
@@ -1057,7 +1144,8 @@ mod tests {
             40.0,
             global_bbox_for_zoom(zoom),
             1.0,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1065,10 +1153,27 @@ mod tests {
         // Create two stores with overlapping entries
         let store1 = create_test_store(
             vec![(
-                GridKey { phrase_id: 1, lang_set: 1 },
+                GridKey {
+                    phrase_id: 1,
+                    lang_set: 1,
+                },
                 vec![
-                    GridEntry { id: 1, x: 1, y: 1, relev: 1.0, score: 1, source_phrase_hash: 0 },
-                    GridEntry { id: 2, x: 2, y: 2, relev: 1.0, score: 1, source_phrase_hash: 0 },
+                    GridEntry {
+                        id: 1,
+                        x: 1,
+                        y: 1,
+                        relev: 1.0,
+                        score: 1,
+                        source_phrase_hash: 0,
+                    },
+                    GridEntry {
+                        id: 2,
+                        x: 2,
+                        y: 2,
+                        relev: 1.0,
+                        score: 1,
+                        source_phrase_hash: 0,
+                    },
                 ],
             )],
             6,
@@ -1077,11 +1182,35 @@ mod tests {
 
         let store2 = create_test_store(
             vec![(
-                GridKey { phrase_id: 2, lang_set: 1 },
+                GridKey {
+                    phrase_id: 2,
+                    lang_set: 1,
+                },
                 vec![
-                    GridEntry { id: 1, x: 1, y: 1, relev: 1.0, score: 3, source_phrase_hash: 0 },
-                    GridEntry { id: 2, x: 2, y: 2, relev: 1.0, score: 3, source_phrase_hash: 0 },
-                    GridEntry { id: 3, x: 3, y: 3, relev: 1.0, score: 1, source_phrase_hash: 0 },
+                    GridEntry {
+                        id: 1,
+                        x: 1,
+                        y: 1,
+                        relev: 1.0,
+                        score: 3,
+                        source_phrase_hash: 0,
+                    },
+                    GridEntry {
+                        id: 2,
+                        x: 2,
+                        y: 2,
+                        relev: 1.0,
+                        score: 3,
+                        source_phrase_hash: 0,
+                    },
+                    GridEntry {
+                        id: 3,
+                        x: 3,
+                        y: 3,
+                        relev: 1.0,
+                        score: 1,
+                        source_phrase_hash: 0,
+                    },
                 ],
             )],
             6,
@@ -1121,30 +1250,57 @@ mod tests {
             },
         ];
 
-        let match_opts = MatchOpts { zoom: 6, ..MatchOpts::default() };
-        
+        let match_opts = MatchOpts {
+            zoom: 6,
+            ..MatchOpts::default()
+        };
+
         // Test tree_coalesce
         let tree = crate::storage::stackable(&stack);
         let result = tree_coalesce(&tree, &match_opts).unwrap();
-        
+
         assert!(!result.is_empty(), "Should have coalesced results");
-        assert_eq!(result[0].entries.len(), 2, "First result should have 2 entries (stacked)");
+        assert_eq!(
+            result[0].entries.len(),
+            2,
+            "First result should have 2 entries (stacked)"
+        );
         assert_eq!(result[0].mask, 3, "First result should have combined mask");
-        
+
         // Check that entries are from both stores
         let has_store1 = result[0].entries.iter().any(|e| e.idx == 1);
         let has_store2 = result[0].entries.iter().any(|e| e.idx == 2);
-        assert!(has_store1 && has_store2, "Result should combine entries from both stores");
+        assert!(
+            has_store1 && has_store2,
+            "Result should combine entries from both stores"
+        );
     }
 
     #[test]
     fn test_coalesce_single_basic() {
         let store = create_test_store(
             vec![(
-                GridKey { phrase_id: 1, lang_set: 1 },
+                GridKey {
+                    phrase_id: 1,
+                    lang_set: 1,
+                },
                 vec![
-                    GridEntry { id: 1, x: 1, y: 1, relev: 1.0, score: 7, source_phrase_hash: 0 },
-                    GridEntry { id: 2, x: 2, y: 2, relev: 0.8, score: 3, source_phrase_hash: 0 },
+                    GridEntry {
+                        id: 1,
+                        x: 1,
+                        y: 1,
+                        relev: 1.0,
+                        score: 7,
+                        source_phrase_hash: 0,
+                    },
+                    GridEntry {
+                        id: 2,
+                        x: 2,
+                        y: 2,
+                        relev: 0.8,
+                        score: 3,
+                        source_phrase_hash: 0,
+                    },
                 ],
             )],
             14,
@@ -1167,21 +1323,45 @@ mod tests {
             mask: 1,
         };
 
-        let match_opts = MatchOpts { zoom: 14, ..MatchOpts::default() };
+        let match_opts = MatchOpts {
+            zoom: 14,
+            ..MatchOpts::default()
+        };
         let result = coalesce_single(&subquery, &match_opts).unwrap();
-        
+
         assert!(!result.is_empty(), "Should have results");
-        assert_eq!(result[0].entries.len(), 1, "Single coalesce should have 1 entry per context");
+        assert_eq!(
+            result[0].entries.len(),
+            1,
+            "Single coalesce should have 1 entry per context"
+        );
     }
 
     #[test]
     fn test_tree_coalesce_with_proximity() {
         let store1 = create_test_store(
             vec![(
-                GridKey { phrase_id: 1, lang_set: 1 },
+                GridKey {
+                    phrase_id: 1,
+                    lang_set: 1,
+                },
                 vec![
-                    GridEntry { id: 1, x: 100, y: 100, relev: 1.0, score: 1, source_phrase_hash: 0 },
-                    GridEntry { id: 2, x: 200, y: 200, relev: 1.0, score: 1, source_phrase_hash: 0 },
+                    GridEntry {
+                        id: 1,
+                        x: 100,
+                        y: 100,
+                        relev: 1.0,
+                        score: 1,
+                        source_phrase_hash: 0,
+                    },
+                    GridEntry {
+                        id: 2,
+                        x: 200,
+                        y: 200,
+                        relev: 1.0,
+                        score: 1,
+                        source_phrase_hash: 0,
+                    },
                 ],
             )],
             14,
@@ -1190,10 +1370,27 @@ mod tests {
 
         let store2 = create_test_store(
             vec![(
-                GridKey { phrase_id: 2, lang_set: 1 },
+                GridKey {
+                    phrase_id: 2,
+                    lang_set: 1,
+                },
                 vec![
-                    GridEntry { id: 1, x: 100, y: 100, relev: 1.0, score: 3, source_phrase_hash: 0 },
-                    GridEntry { id: 2, x: 200, y: 200, relev: 1.0, score: 3, source_phrase_hash: 0 },
+                    GridEntry {
+                        id: 1,
+                        x: 100,
+                        y: 100,
+                        relev: 1.0,
+                        score: 3,
+                        source_phrase_hash: 0,
+                    },
+                    GridEntry {
+                        id: 2,
+                        x: 200,
+                        y: 200,
+                        relev: 1.0,
+                        score: 3,
+                        source_phrase_hash: 0,
+                    },
                 ],
             )],
             14,
@@ -1239,12 +1436,15 @@ mod tests {
             proximity: Some([105, 105]),
             ..MatchOpts::default()
         };
-        
+
         let tree = crate::storage::stackable(&stack);
         let result = tree_coalesce(&tree, &match_opts).unwrap();
-        
+
         assert!(!result.is_empty(), "Should have results with proximity");
         // First result should be closer to proximity point
-        assert_eq!(result[0].entries[0].grid_entry.id, 1, "Closest entry should be first");
+        assert_eq!(
+            result[0].entries[0].grid_entry.id, 1,
+            "Closest entry should be first"
+        );
     }
 }

@@ -310,6 +310,39 @@ fn decode_value(value: &[u8]) -> Result<Vec<GridEntry>> {
 ///
 /// Groups by relevance, then within each relevance group, merges coords from
 /// different scores sorted by scoredist (highest first).
+///
+/// # Algorithm Overview
+///
+/// ```text
+/// Input: Serialized data with structure:
+///   [(relev_score_byte, HashMap<morton, feature_ids>), ...]
+///   Already sorted by relev_score descending
+///
+/// Step 1: Deserialize and flatten
+///   [(1.0, 7, morton1, [id1, id2]), (1.0, 5, morton2, [id3]), (0.8, 7, morton3, [id4])]
+///    └relev└score
+///
+/// Step 2: Group by relevance
+///   Relevance 1.0: [(1.0, 7, morton1, [id1,id2]), (1.0, 5, morton2, [id3])]
+///   Relevance 0.8: [(0.8, 7, morton3, [id4])]
+///
+/// Step 3: Within each relevance group, process each coord
+///   For relevance 1.0:
+///     Score 7: (distance=10, scoredist=50, x, y, [id1,id2])
+///     Score 5: (distance=5,  scoredist=60, x, y, [id3])
+///
+/// Step 4: kmerge by scoredist (highest first)
+///   Score 5 with scoredist=60 comes before Score 7 with scoredist=50
+///   Result: [id3, id1, id2] (all at relevance 1.0)
+///
+/// Step 5: Move to next relevance group (0.8) and repeat
+///
+/// Final output order:
+///   [id3 (relev=1.0, scoredist=60),
+///    id1 (relev=1.0, scoredist=50),
+///    id2 (relev=1.0, scoredist=50),
+///    id4 (relev=0.8, scoredist=...)]
+/// ```
 #[inline]
 fn decode_matching_value<T: AsRef<[u8]>>(
     value: T,

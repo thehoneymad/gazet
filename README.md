@@ -12,21 +12,21 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 
 ## Current Status
 
-🚧 **Phase 2: Query Support** - In Progress
+✅ **Phase 2: Query Support** - COMPLETE
 
-Recent completion:
+Completed features:
 - ✅ Streaming iterator with IntervalHeap priority queue
 - ✅ Deterministic ordering via write-time sorting
-- ✅ Basic range query test
 - ✅ 4-case spatial filtering (none/bbox/proximity/both)
 - ✅ Proximity-based ordering with scoredist calculation
 - ✅ Multi-level kmerge tiebreakers (scoredist → distance → y → x)
 - ✅ Comprehensive spatial filtering tests matching carmen-core
+- ✅ Query tests (exact phrase, range, prefix bins, language filtering, language penalty)
+- ✅ Single-phrase coalescing with deduplication and relevance filtering
 
-Still needed:
-- ❌ Coalescing/stacking logic
-- ❌ Language penalty application (4% for wrong language outside radius)
-- ❌ Additional query edge case tests
+Future enhancements:
+- ❌ Multi-phrase stacking (combining "Main" + "Street" results)
+- ❌ Error logging for corrupted entries
 
 ## Documentation
 

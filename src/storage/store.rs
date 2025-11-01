@@ -64,6 +64,7 @@ const DEFAULT_ZOOM: u16 = 6;
 const DEFAULT_COALESCE_RADIUS: f64 = 0.0;
 
 /// Read-only interface to a GridStore database.
+#[derive(Debug)]
 pub struct GridStore {
     db: DB,
     /// Bin boundaries for prefix bin optimization.

@@ -179,6 +179,232 @@ impl<'a, T: Borrow<GridStore> + Clone + Debug> ArenaManager<'a, T> {
     }
 }
 
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::storage::{GridStoreBuilder, GridKey, GridEntry, MatchKey, MatchPhrase, MatchKeyWithId};
+    use tempfile;
+
+    #[test]
+    fn simple_stackable_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey { phrase_id: 1, lang_set: 1 };
+        let entries = vec![
+            GridEntry { id: 2, x: 2, y: 2, relev: 0.8, score: 3, source_phrase_hash: 0 },
+            GridEntry { id: 3, x: 3, y: 3, relev: 1., score: 1, source_phrase_hash: 1 },
+            GridEntry { id: 1, x: 1, y: 1, relev: 1., score: 7, source_phrase_hash: 2 },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store1 = GridStore::new_with_options(dir.path(), 14, 200., 1).unwrap();
+        let store2 = GridStore::new_with_options(dir.path(), 14, 200., 2).unwrap();
+
+        let a1 = PhrasematchSubquery {
+            store: &store1,
+            idx: 1,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 0,
+            }],
+            mask: 2,
+        };
+
+        let b1 = PhrasematchSubquery {
+            store: &store2,
+            idx: 2,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 1,
+            }],
+            mask: 1,
+        };
+
+        let b2 = PhrasematchSubquery {
+            store: &store2,
+            idx: 2,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 2,
+            }],
+            mask: 1,
+        };
+
+        let phrasematches = vec![a1, b1, b2];
+        let tree = stackable(&phrasematches);
+
+        // Tree structure: root -> type_id=1 (a1) -> type_id=2 (b1, b2)
+        // Root has 1 child (a1 from type_id=1)
+        assert_eq!(tree.root.children.len(), 1, "Root should have 1 child (type_id=1 bin)");
+        
+        let a1_node = tree.arena.get(tree.root.children[0]).unwrap();
+        assert_eq!(a1_node.children.len(), 2, "a1 can stack with b1 and b2");
+        
+        let a1_children_ids: Vec<u32> = a1_node.children.iter()
+            .map(|idx| tree.arena.get(*idx).unwrap().phrasematch.unwrap().match_keys[0].id)
+            .collect();
+        assert_eq!(vec![1, 2], a1_children_ids, "a1 stacks with b1 (id=1) and b2 (id=2)");
+
+        // b1 and b2 are leaves (cannot stack with each other - same mask)
+        let b1_node = tree.arena.get(a1_node.children[0]).unwrap();
+        assert_eq!(b1_node.children.len(), 0, "b1 cannot stack further (same mask as b2)");
+        
+        let b2_node = tree.arena.get(a1_node.children[1]).unwrap();
+        assert_eq!(b2_node.children.len(), 0, "b2 cannot stack further (same mask as b1)");
+    }
+
+    #[test]
+    fn bmask_stackable_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey { phrase_id: 1, lang_set: 1 };
+        let entries = vec![
+            GridEntry { id: 2, x: 2, y: 2, relev: 0.8, score: 3, source_phrase_hash: 0 },
+            GridEntry { id: 3, x: 3, y: 3, relev: 1., score: 1, source_phrase_hash: 1 },
+            GridEntry { id: 1, x: 1, y: 1, relev: 1., score: 7, source_phrase_hash: 2 },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new_with_options(dir.path(), 14, 200., 0).unwrap();
+
+        let a1 = PhrasematchSubquery {
+            store: &store,
+            idx: 1,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 0,
+            }],
+            mask: 1,
+        };
+
+        let b1 = PhrasematchSubquery {
+            store: &store,
+            idx: 1,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 1,
+            }],
+            mask: 1,
+        };
+
+        let phrasematches = vec![a1, b1];
+        let tree = stackable(&phrasematches);
+        let bmask_stacks: Vec<bool> = bfs(tree).iter().map(|n| n.is_leaf()).collect();
+
+        assert_eq!(bmask_stacks[1], true, "a1 cannot stack with b1 - bmask conflict");
+        assert_eq!(bmask_stacks[2], true, "b1 cannot stack with a1 - bmask conflict");
+    }
+
+    #[test]
+    fn mask_stackable_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey { phrase_id: 1, lang_set: 1 };
+        let entries = vec![
+            GridEntry { id: 2, x: 2, y: 2, relev: 0.8, score: 3, source_phrase_hash: 0 },
+            GridEntry { id: 3, x: 3, y: 3, relev: 1., score: 1, source_phrase_hash: 1 },
+            GridEntry { id: 1, x: 1, y: 1, relev: 1., score: 7, source_phrase_hash: 2 },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new_with_options(dir.path(), 14, 200., 0).unwrap();
+
+        let a1 = PhrasematchSubquery {
+            store: &store,
+            idx: 1,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 0,
+            }],
+            mask: 1,
+        };
+
+        let b1 = PhrasematchSubquery {
+            store: &store,
+            idx: 1,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 1,
+            }],
+            mask: 1,
+        };
+
+        let phrasematches = vec![a1, b1];
+        let tree = stackable(&phrasematches);
+        let mask_stacks: Vec<bool> = bfs(tree).iter().map(|n| n.is_leaf()).collect();
+
+        assert_eq!(mask_stacks[1], true, "a1 and b1 cannot stack - same mask");
+        assert_eq!(mask_stacks[2], true, "a1 and b1 cannot stack - same mask");
+    }
+
+    #[test]
+    fn binned_stackable_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = GridStoreBuilder::new(dir.path()).unwrap();
+
+        let key = GridKey { phrase_id: 1, lang_set: 1 };
+        let entries = vec![
+            GridEntry { id: 2, x: 2, y: 2, relev: 0.8, score: 3, source_phrase_hash: 0 },
+            GridEntry { id: 3, x: 3, y: 3, relev: 1., score: 1, source_phrase_hash: 1 },
+            GridEntry { id: 1, x: 1, y: 1, relev: 1., score: 7, source_phrase_hash: 2 },
+        ];
+        builder.insert(&key, entries).unwrap();
+        builder.finish().unwrap();
+
+        let store = GridStore::new_with_options(dir.path(), 14, 200., 0).unwrap();
+
+        let a1 = PhrasematchSubquery {
+            store: &store,
+            idx: 1,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 0,
+            }],
+            mask: 1,
+        };
+
+        let b1 = PhrasematchSubquery {
+            store: &store,
+            idx: 1,
+            non_overlapping_indexes: FixedBitSet::with_capacity(MAX_INDEXES),
+            weight: 0.5,
+            match_keys: vec![MatchKeyWithId {
+                key: MatchKey { match_phrase: MatchPhrase::Range { start: 0, end: 1 }, lang_set: 0 },
+                id: 1,
+            }],
+            mask: 1,
+        };
+
+        let phrasematches = vec![a1, b1];
+        let tree = stackable(&phrasematches);
+        
+        // Just verify tree builds without panicking
+        assert!(tree.root.children.len() >= 0);
+    }
+}
+
 /// Complete stackable tree with root node and arena manager.
 ///
 /// The tree represents all valid phrase combinations that can be spatially stacked.

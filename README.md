@@ -15,14 +15,18 @@ Cascade builds upon the proven Carmen geocoder architecture while introducing th
 🚧 **Phase 2: Query Support** - In Progress
 
 Recent completion:
-- ✅ Streaming iterator with BinaryHeap priority queue
+- ✅ Streaming iterator with IntervalHeap priority queue
 - ✅ Deterministic ordering via write-time sorting
 - ✅ Basic range query test
+- ✅ 4-case spatial filtering (none/bbox/proximity/both)
+- ✅ Proximity-based ordering with scoredist calculation
+- ✅ Multi-level kmerge tiebreakers (scoredist → distance → y → x)
+- ✅ Comprehensive spatial filtering tests matching carmen-core
 
 Still needed:
-- ❌ Spatial filtering (bbox, proximity, zoom)
-- ❌ Comprehensive query tests
 - ❌ Coalescing/stacking logic
+- ❌ Language penalty application (4% for wrong language outside radius)
+- ❌ Additional query edge case tests
 
 ## Documentation
 
@@ -94,30 +98,30 @@ cargo doc --document-private-items --no-deps --open
   - [x] Language filtering during iteration
 - [x] Complete get_matching() implementation
   - [x] Add max_values parameter for result limiting
-  - [x] Implement priority queue (BinaryHeap) for top-K results
+  - [x] Implement priority queue (IntervalHeap) for top-K results
   - [x] Return streaming iterator (std::iter::from_fn pattern)
   - [x] Deterministic ordering via write-time sorting
   - [x] Basic range query test
-- [ ] Implement spatial matching (adds zoom, bboxes, coalesce_radius to GridStore)
-  - [ ] Add new_with_options() constructor
-  - [ ] Bounding box queries
-  - [ ] Proximity-based ranking
-  - [ ] Zoom level coordination
-  - [ ] Note: Fields added incrementally as features are implemented
-  - [ ] Add new_with_options() constructor
-  - [ ] Bounding box queries
-  - [ ] Proximity-based ranking
-  - [ ] Zoom level coordination
-  - [ ] Note: Fields added incrementally as features are implemented
+- [x] Implement spatial matching
+  - [x] Add new_with_options() constructor with zoom and coalesce_radius
+  - [x] Bounding box queries (4-case spatial filtering)
+  - [x] Proximity-based ranking with scoredist calculation
+  - [x] Zoom level coordination via MatchOpts
+  - [x] Multi-level kmerge tiebreakers (scoredist → distance → y → x)
 - [ ] Add coalescing/stacking logic
   - [ ] Spatial overlap detection
   - [ ] Relevance score combination
-- [ ] Write query tests
+  - [ ] Component type compatibility checking
+- [x] Write spatial filtering tests
+  - [x] Test proximity ordering (matches carmen-core)
+  - [x] Test bbox filtering
+  - [x] Test multiple coords per score
+- [ ] Write additional query tests
   - [ ] Test exact phrase matching
   - [ ] Test range queries (prefix matching)
   - [ ] Test prefix bin optimization
   - [ ] Test language filtering
-  - [ ] Test spatial filtering
+  - [ ] Test language penalty (4% outside radius)
 - [ ] Add error logging
   - [ ] Log corrupted database entries during iteration
   - [ ] Log skipped entries in get_matching()

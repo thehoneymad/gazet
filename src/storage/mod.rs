@@ -17,12 +17,14 @@
 //! - **Grouped storage**: Entries grouped by relevance/score for query efficiency
 
 mod builder;
+mod coalesce;
 mod common;
 mod error;
 mod spatial;
 mod store;
 
 pub use builder::GridStoreBuilder;
+pub use coalesce::{coalesce_single, CoalesceContext};
 pub use common::*;
 pub use error::*;
 pub use spatial::*;

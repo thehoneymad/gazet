@@ -14,5 +14,10 @@ itertools = "0.14.0"
 tempfile = "3.23.0"
 interval-heap = "0.0.5"
 ordered-float = "5.1.0"
+# Multi-phrase coalescing dependencies (from carmen-core)
+generational-arena = "0.2"
+fxhash = "0.2"
+indexmap = "2.0"
+fixedbitset = "0.5"
 
 [dev-dependencies]

@@ -60,6 +60,11 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
+use fixedbitset::FixedBitSet;
+
+/// Maximum number of indexes (phrase sources) that can be queried together
+pub const MAX_INDEXES: usize = 200;
+
 /// Unique identifier for a phrase (supports up to 4 billion phrases).
 pub type PhraseId = u32;
 
@@ -983,3 +988,107 @@ mod tests {
         assert_eq!(original, decoded);
     }
 }
+
+// ============================================================================
+// Multi-Phrase Coalescing Structures (Phase 2.5)
+// ============================================================================
+
+/// Extended match key with phrasematch ID for multi-phrase queries.
+///
+/// Used in multi-phrase coalescing to track which phrasematch a result came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchKeyWithId {
+    /// Unique ID for this phrasematch within the query
+    pub id: u32,
+    /// The underlying match key (phrase range + language)
+    pub key: MatchKey,
+}
+
+impl Default for MatchKeyWithId {
+    fn default() -> Self {
+        MatchKeyWithId {
+            id: 0,
+            key: MatchKey {
+                match_phrase: MatchPhrase::Exact(0),
+                lang_set: 0,
+            },
+        }
+    }
+}
+
+/// A phrasematch subquery for multi-phrase coalescing.
+///
+/// Represents one phrase in a multi-phrase query (e.g., "Main" in "Main Street Seattle").
+/// Multiple PhrasematchSubqueries are combined via stacking to form complete addresses.
+///
+/// # Example
+/// ```ignore
+/// // Query: "Main Street Seattle"
+/// // Creates 3 PhrasematchSubqueries:
+/// PhrasematchSubquery {
+///     store: &streets_store,  // "Main Street" index
+///     idx: 0,                  // First phrase
+///     weight: 0.8,             // Relevance weight
+///     match_keys: vec![...],   // Keys for "Main Street"
+///     mask: 0b001,             // Bitmask for stacking
+///     ...
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct PhrasematchSubquery<T> {
+    /// Reference to the GridStore for this phrase
+    pub store: T,
+    /// Index of this phrase in the query (0, 1, 2, ...)
+    pub idx: u16,
+    /// Indexes that cannot stack with this one (spatial conflicts)
+    pub non_overlapping_indexes: FixedBitSet,
+    /// Relevance weight for this phrase (0.0-1.0)
+    pub weight: f64,
+    /// Match keys to query (usually one, but can be multiple for synonyms)
+    pub match_keys: Vec<MatchKeyWithId>,
+    /// Bitmask for stacking (1 << idx)
+    pub mask: u32,
+}
+
+/// Extended coalesce entry with multi-phrase metadata.
+///
+/// Extends MatchEntry with fields needed for multi-phrase stacking:
+/// - `idx`: Which phrase this came from
+/// - `mask`: Bitmask for tracking stacked phrases
+/// - `tmp_id`: Temporary ID combining idx and feature ID
+/// - `phrasematch_id`: Which MatchKeyWithId produced this result
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoalesceEntry {
+    /// The underlying grid entry
+    pub grid_entry: GridEntry,
+    /// Whether this entry matches the query language
+    pub matches_language: bool,
+    /// Index of the phrase that produced this entry
+    pub idx: u16,
+    /// Temporary ID: (idx << 24) | feature_id
+    pub tmp_id: u32,
+    /// Bitmask of stacked phrases (1 << idx for each phrase)
+    pub mask: u32,
+    /// Distance from proximity point
+    pub distance: f64,
+    /// Proximity-adjusted score
+    pub scoredist: f64,
+    /// Which MatchKeyWithId produced this result
+    pub phrasematch_id: u32,
+}
+
+impl From<&MatchEntry> for CoalesceEntry {
+    fn from(entry: &MatchEntry) -> Self {
+        CoalesceEntry {
+            grid_entry: entry.grid_entry.clone(),
+            matches_language: entry.matches_language,
+            idx: 0,
+            tmp_id: entry.grid_entry.id,
+            mask: 1,
+            distance: entry.distance,
+            scoredist: entry.scoredist,
+            phrasematch_id: 0,
+        }
+    }
+}
+

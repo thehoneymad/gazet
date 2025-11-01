@@ -477,10 +477,46 @@ fn coalesce_multi<T: Borrow<GridStore> + Clone>(
     Ok(contexts)
 }
 
-// Stub for tree_coalesce - will implement after testing coalesce_multi
+// Tree-based coalesce using stackable trees and KDBush spatial indexing
+//
+// TODO: Full implementation requires:
+// 1. ConstrainedPriorityQueue wrapper around MinMaxHeap
+// 2. TreeCoalesceState with KDBush spatial index
+// 3. CoalesceStep priority queue walker
+// 4. Parallel processing with rayon
+// 5. Query quotas (one-letter, high-zoom, etc.)
+// 6. Spatial overlap checks with KDBush
+//
+// For now, fall back to coalesce_multi which provides similar functionality
+// without the tree optimization.
 pub fn tree_coalesce<T: Borrow<GridStore> + Clone + Debug>(
-    _stack_tree: &StackableTree<T>,
-    _match_opts: &MatchOpts,
+    stack_tree: &StackableTree<T>,
+    match_opts: &MatchOpts,
 ) -> Result<Vec<CoalesceContext>> {
-    unimplemented!("tree_coalesce not yet ported")
+    // Extract phrasematches from tree and use coalesce_multi
+    let mut stack: Vec<PhrasematchSubquery<T>> = Vec::new();
+    
+    // Walk tree to collect all phrasematches
+    fn collect_phrasematches<'a, T: Borrow<GridStore> + Clone + Debug>(
+        node: &'a crate::storage::StackableNode<'a, T>,
+        arena: &'a crate::storage::ArenaManager<'a, T>,
+        stack: &mut Vec<PhrasematchSubquery<T>>,
+    ) {
+        if let Some(pm) = node.phrasematch {
+            stack.push(pm.clone());
+        }
+        for child_idx in &node.children {
+            if let Some(child) = arena.get(*child_idx) {
+                collect_phrasematches(child, arena, stack);
+            }
+        }
+    }
+    
+    collect_phrasematches(&stack_tree.root, &stack_tree.arena, &mut stack);
+    
+    // Deduplicate by idx (same phrase may appear multiple times in tree)
+    stack.sort_by_key(|pm| pm.idx);
+    stack.dedup_by_key(|pm| pm.idx);
+    
+    coalesce_multi(stack, match_opts)
 }

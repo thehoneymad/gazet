@@ -29,5 +29,5 @@ pub use coalesce::{coalesce_single, CoalesceContext};
 pub use common::*;
 pub use error::*;
 pub use spatial::*;
-pub use stackable::{stackable, StackableNode, StackableTree};
+pub use stackable::{stackable, StackableNode, StackableTree, ArenaManager};
 pub use store::GridStore;
